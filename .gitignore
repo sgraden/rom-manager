@@ -1,0 +1,15 @@
+node_modules/
+web/dist/
+dist/
+*.log
+.DS_Store
+
+# runtime-generated, machine-specific — regenerated on first run
+config/config.json
+data/*.json
+staging/*
+!staging/.gitkeep
+
+# user-supplied, not part of the repo
+config/dats/*
+!config/dats/.gitkeep

@@ -1,0 +1,61 @@
+import { openSync, readSync, closeSync, writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+export interface CueGenResult {
+  cuePath: string;
+  /** The generated .cue's own directory — caller must clean this up when done. */
+  tmpDir: string;
+  mode: string;
+  /** False when the mode was guessed rather than read from the sector header — surface a warning. */
+  confident: boolean;
+}
+
+function readFirstBytes(filePath: string, length: number): Buffer {
+  const fd = openSync(filePath, "r");
+  try {
+    const buf = Buffer.alloc(length);
+    const bytesRead = readSync(fd, buf, 0, length, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Synthesizes a single-track .cue for a bare .bin with no accompanying cue
+ * sheet at all. Sector mode is read from the first sector's mode byte
+ * (offset 0x0F in a raw 2352-byte sector) when the file size is a multiple
+ * of 2352; otherwise it falls back to a 2048-byte-sector guess. A wrong
+ * guess here produces a CHD that won't boot, so `confident` should be
+ * surfaced to the user rather than silently trusted.
+ */
+export function generateCueForBin(binPath: string, binSizeBytes: number): CueGenResult {
+  let mode: string;
+  let confident = true;
+
+  if (binSizeBytes > 0 && binSizeBytes % 2352 === 0) {
+    const header = readFirstBytes(binPath, 16);
+    const modeByte = header.length >= 16 ? header[15] : undefined;
+    if (modeByte === 0x02) {
+      mode = "MODE2/2352";
+    } else if (modeByte === 0x01) {
+      mode = "MODE1/2352";
+    } else {
+      mode = "MODE1/2352";
+      confident = false;
+    }
+  } else if (binSizeBytes > 0 && binSizeBytes % 2048 === 0) {
+    mode = "MODE1/2048";
+  } else {
+    mode = "MODE1/2352";
+    confident = false;
+  }
+
+  const tmpDir = mkdtempSync(path.join(tmpdir(), "rom-manager-cuegen-"));
+  const cuePath = path.join(tmpDir, "generated.cue");
+  const cueContent = `FILE "${binPath}" BINARY\n  TRACK 01 ${mode}\n    INDEX 01 00:00:00\n`;
+  writeFileSync(cuePath, cueContent, "utf-8");
+
+  return { cuePath, tmpDir, mode, confident };
+}

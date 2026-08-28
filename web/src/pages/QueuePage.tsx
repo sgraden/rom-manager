@@ -1,0 +1,112 @@
+import { useEffect, useState } from "react";
+import { subscribeJobEvents, cancelJob, type JobInfo } from "../api";
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "—";
+  const mb = bytes / 1024 ** 2;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return `${mb.toFixed(1)} MB`;
+}
+
+const STATE_LABEL: Record<JobInfo["state"], string> = {
+  queued: "Queued",
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => void }) {
+  return (
+    <tr className={job.state === "failed" ? "row-error" : ""}>
+      <td className="mono">{job.sourceName}</td>
+      <td>{job.action}</td>
+      <td className="mono">
+        {job.destinationFolder}/{job.destinationFilename}
+      </td>
+      <td>
+        <div className="job-state">
+          <span>{STATE_LABEL[job.state]}</span>
+          {job.state === "running" && <span className="muted"> — {job.phase} {Math.round(job.percent)}%</span>}
+        </div>
+        {(job.state === "running" || job.state === "queued") && (
+          <div className="progress-track">
+            <div
+              className="progress-fill"
+              style={{ transform: `scaleX(${(job.state === "running" ? job.percent : 0) / 100})` }}
+            />
+          </div>
+        )}
+        {job.error && <div className="warning-line">⚠ {job.error}</div>}
+        {job.m3uWritten && <div className="muted">Playlist written: {job.m3uWritten}</div>}
+      </td>
+      <td>{formatBytes(job.resultBytes)}</td>
+      <td>
+        {(job.state === "queued" || job.state === "running") && <button onClick={() => onCancel(job.id)}>Cancel</button>}
+      </td>
+    </tr>
+  );
+}
+
+export function QueuePage() {
+  const [jobs, setJobs] = useState<Map<string, JobInfo>>(new Map());
+  const [order, setOrder] = useState<string[]>([]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeJobEvents((event) => {
+      if (event.type === "snapshot") {
+        const map = new Map(event.jobs.map((j) => [j.id, j] as const));
+        setJobs(map);
+        setOrder(event.jobs.map((j) => j.id));
+      } else {
+        setJobs((prev) => {
+          const next = new Map(prev);
+          next.set(event.job.id, event.job);
+          return next;
+        });
+        setOrder((prev) => (prev.includes(event.job.id) ? prev : [...prev, event.job.id]));
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  async function handleCancel(id: string) {
+    try {
+      await cancelJob(id);
+    } catch {
+      // the job row will reflect the real state on the next SSE update regardless
+    }
+  }
+
+  const jobList = order.map((id) => jobs.get(id)).filter((j): j is JobInfo => !!j);
+
+  if (jobList.length === 0) {
+    return (
+      <div className="queue-page">
+        <p className="muted">No jobs yet — build and process a plan on the Review tab.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="queue-page">
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Action</th>
+            <th>Destination</th>
+            <th>Status</th>
+            <th>Size</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {jobList.map((job) => (
+            <JobRow key={job.id} job={job} onCancel={handleCancel} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

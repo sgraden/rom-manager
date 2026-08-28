@@ -9,6 +9,8 @@ import {
   type ConvertAction,
   type PlanOverride,
 } from "../api";
+import { useSlowFlag } from "../useSlowFlag";
+import { Spinner } from "../Spinner";
 
 const ACTIONS: ConvertAction[] = ["chd-cd", "chd-dvd", "rvz", "keep-zip", "copy"];
 
@@ -67,7 +69,9 @@ export function ReviewPage({
   const [jobs, setJobs] = useState<PlannedJob[]>(initialJobs);
   const [overrides, setOverrides] = useState<Record<string, PlanOverride>>({});
   const [busy, setBusy] = useState(false);
+  const slowBusy = useSlowFlag(busy);
   const [processing, setProcessing] = useState(false);
+  const slowProcessing = useSlowFlag(processing);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -149,6 +153,12 @@ export function ReviewPage({
           {processing ? "Starting…" : `Process (${readyCount})`}
         </button>
       </div>
+      {processing && (
+        <p className="inline-status">
+          <Spinner />
+          {slowProcessing ? "Still working — enqueueing a lot of files takes a moment." : "Starting jobs…"}
+        </p>
+      )}
       <details className="action-help">
         <summary>What do these actions mean?</summary>
         <ul>
@@ -160,7 +170,12 @@ export function ReviewPage({
         </ul>
       </details>
       {error && <p className="error">{error}</p>}
-      {busy && <p className="muted">Re-planning…</p>}
+      {busy && (
+        <p className="inline-status">
+          <Spinner />
+          {slowBusy ? "Still working — re-checking the destination takes a moment." : "Re-planning…"}
+        </p>
+      )}
 
       <table>
         <thead>

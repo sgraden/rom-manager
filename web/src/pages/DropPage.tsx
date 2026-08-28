@@ -9,6 +9,8 @@ import {
   type BrowseEntry,
   type PlannedJob,
 } from "../api";
+import { useSlowFlag } from "../useSlowFlag";
+import { Spinner } from "../Spinner";
 
 interface QueuedSource {
   key: string;
@@ -32,6 +34,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
   const [pathInput, setPathInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
+  const slowPlanning = useSlowFlag(planning);
   const [dragActive, setDragActive] = useState(false);
 
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -246,6 +249,14 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
           <button onClick={handleBuildPlan} disabled={readyCount === 0 || !targetName || planning}>
             {planning ? "Building plan…" : `Build Plan (${readyCount})`}
           </button>
+          {planning && (
+            <span className="inline-status">
+              <Spinner />
+              {slowPlanning
+                ? "Still working — inspecting archived or multi-disc files takes longer."
+                : "Detecting systems and checking destinations…"}
+            </span>
+          )}
         </div>
       </section>
     </div>

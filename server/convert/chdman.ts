@@ -39,9 +39,11 @@ export function createChd(
   inputPath: string,
   outputPath: string,
   mode: "createcd" | "createdvd",
-  options?: RunOptions,
+  options?: RunOptions & { threads?: number },
 ): Promise<void> {
-  return run(chdmanPath, [mode, "-i", inputPath, "-o", outputPath, "-f"], "converting", options);
+  const args = [mode, "-i", inputPath, "-o", outputPath, "-f"];
+  if (options?.threads) args.push("-np", String(options.threads));
+  return run(chdmanPath, args, "converting", options);
 }
 
 export function verifyChd(chdmanPath: string, chdPath: string, options?: RunOptions): Promise<void> {

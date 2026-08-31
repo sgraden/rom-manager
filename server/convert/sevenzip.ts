@@ -27,8 +27,16 @@ function run(sevenZipPath: string, args: string[], label: string, options: RunOp
   });
 }
 
-export function createZip(sevenZipPath: string, sourceFile: string, destZipPath: string, options: RunOptions = {}): Promise<void> {
-  return run(sevenZipPath, ["a", "-tzip", "-y", destZipPath, sourceFile], "7-Zip", options);
+export function createZip(
+  sevenZipPath: string,
+  sourceFile: string,
+  destZipPath: string,
+  options: RunOptions & { threads?: number } = {},
+): Promise<void> {
+  const args = ["a", "-tzip"];
+  if (options.threads) args.push(`-mmt${options.threads}`);
+  args.push("-y", destZipPath, sourceFile);
+  return run(sevenZipPath, args, "7-Zip", options);
 }
 
 export function extractArchiveAsync(sevenZipPath: string, archivePath: string, destDir: string, options: RunOptions = {}): Promise<void> {

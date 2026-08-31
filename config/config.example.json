@@ -1,6 +1,7 @@
 {
   "port": 3001,
-  "maxConcurrentJobs": 1,
+  "maxConcurrentJobs": 2,
+  "reservedCpuCores": 2,
   "verifyAfterConvert": true,
   "deleteSourceAfterSuccess": false,
   "additionalTargetPaths": [],

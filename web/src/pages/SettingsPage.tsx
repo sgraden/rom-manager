@@ -6,10 +6,13 @@ import {
   fetchFolderMap,
   setFolderMapEntry,
   createFolder,
+  fetchPerformanceConfig,
+  setPerformanceConfig,
   type ToolInfo,
   type TargetInfo,
   type SystemDef,
   type FolderMapResult,
+  type PerformanceConfig,
 } from "../api";
 
 const CREATE_FOLDER_SENTINEL = "__create__";
@@ -93,6 +96,70 @@ function FolderMapEditor({ target, systems }: { target: TargetInfo; systems: Sys
   );
 }
 
+function PerformanceSettings() {
+  const [config, setConfig] = useState<PerformanceConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchPerformanceConfig()
+      .then(setConfig)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  async function handleChange(patch: Partial<Omit<PerformanceConfig, "cpuCoreCount">>) {
+    setSaving(true);
+    setError(null);
+    try {
+      setConfig(await setPerformanceConfig(patch));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (error) return <p className="error">{error}</p>;
+  if (!config) return <p className="muted">Loading…</p>;
+
+  const threadsPerJob = Math.max(1, Math.floor(Math.max(1, config.cpuCoreCount - config.reservedCpuCores) / Math.max(1, config.maxConcurrentJobs)));
+
+  return (
+    <div className="performance-settings">
+      <div className="field-row">
+        <label htmlFor="max-concurrent">Concurrent conversions</label>
+        <input
+          id="max-concurrent"
+          type="number"
+          min={1}
+          max={8}
+          value={config.maxConcurrentJobs}
+          disabled={saving}
+          onChange={(e) => handleChange({ maxConcurrentJobs: Math.max(1, Number(e.target.value) || 1) })}
+        />
+      </div>
+      <div className="field-row">
+        <label htmlFor="reserved-cores">Cores reserved for other apps</label>
+        <input
+          id="reserved-cores"
+          type="number"
+          min={0}
+          max={Math.max(0, config.cpuCoreCount - 1)}
+          value={config.reservedCpuCores}
+          disabled={saving}
+          onChange={(e) => handleChange({ reservedCpuCores: Math.max(0, Number(e.target.value) || 0) })}
+        />
+      </div>
+      <p className="muted">
+        {config.cpuCoreCount} cores detected. Each conversion is capped to about {threadsPerJob} thread{threadsPerJob === 1 ? "" : "s"}, so
+        running {config.maxConcurrentJobs} at once never uses more than ~{config.cpuCoreCount - config.reservedCpuCores} of{" "}
+        {config.cpuCoreCount} cores — the rest stays free for browsing and everything else. Raising "Concurrent conversions" starts more
+        queued jobs right away; changing the reserved-cores split only applies to jobs that haven't started yet.
+      </p>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
@@ -124,6 +191,11 @@ export function SettingsPage() {
 
   return (
     <div className="settings">
+      <section>
+        <h2>Performance</h2>
+        <PerformanceSettings />
+      </section>
+
       <section>
         <div className="section-header">
           <h2>Conversion tools</h2>

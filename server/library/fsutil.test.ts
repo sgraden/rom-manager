@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor } from "./fsutil.js";
+import path from "node:path";
+import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor, isPathInside, stagedUploadPath } from "./fsutil.js";
 
 describe("sanitizeExfatName", () => {
   it("leaves an already-safe name untouched", () => {
@@ -51,5 +52,53 @@ describe("outputFilenameFor", () => {
 
   it("keeps the original name for copy", () => {
     expect(outputFilenameFor("game.d64", "copy")).toBe("game.d64");
+  });
+});
+
+describe("isPathInside", () => {
+  it("is true for a file directly inside the directory", () => {
+    expect(isPathInside("/a/b/staging/file.zip", "/a/b/staging")).toBe(true);
+  });
+
+  it("is true for a file nested deeper inside", () => {
+    expect(isPathInside("/a/b/staging/sub/file.zip", "/a/b/staging")).toBe(true);
+  });
+
+  it("is false for a file outside the directory", () => {
+    expect(isPathInside("/a/b/elsewhere/file.zip", "/a/b/staging")).toBe(false);
+  });
+
+  it("is false for a sibling directory with a matching name prefix", () => {
+    expect(isPathInside("/a/b/staging-other/file.zip", "/a/b/staging")).toBe(false);
+  });
+
+  it("is false for the directory itself", () => {
+    expect(isPathInside("/a/b/staging", "/a/b/staging")).toBe(false);
+  });
+});
+
+describe("stagedUploadPath", () => {
+  it("keeps the basename identical to the original filename — no id prefix leaks in", () => {
+    const { filePath, safeName } = stagedUploadPath("/staging", "Dark Cloud 2 (USA) (v2.00).zip");
+    expect(path.basename(filePath)).toBe("Dark Cloud 2 (USA) (v2.00).zip");
+    expect(safeName).toBe("Dark Cloud 2 (USA) (v2.00).zip");
+  });
+
+  it("puts the disambiguating id only in the parent directory, inside stagingDir", () => {
+    const { filePath, uploadDir } = stagedUploadPath("/staging", "game.nes");
+    expect(path.dirname(filePath)).toBe(uploadDir);
+    expect(uploadDir).not.toBe("/staging");
+    expect(isPathInside(uploadDir, "/staging")).toBe(true);
+  });
+
+  it("strips directory components from a hostile filename", () => {
+    const { filePath } = stagedUploadPath("/staging", "../../etc/passwd");
+    expect(path.basename(filePath)).toBe("passwd");
+  });
+
+  it("gives each call its own upload directory, even for the same filename", () => {
+    const a = stagedUploadPath("/staging", "game.nes");
+    const b = stagedUploadPath("/staging", "game.nes");
+    expect(a.uploadDir).not.toBe(b.uploadDir);
   });
 });

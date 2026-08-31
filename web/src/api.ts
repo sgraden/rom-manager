@@ -206,6 +206,22 @@ export function cancelJob(id: string): Promise<{ ok: true }> {
   return postJson(`/api/jobs/${encodeURIComponent(id)}/cancel`, {});
 }
 
+export interface PerformanceConfig {
+  maxConcurrentJobs: number;
+  reservedCpuCores: number;
+  verifyAfterConvert: boolean;
+  deleteSourceAfterSuccess: boolean;
+  cpuCoreCount: number;
+}
+
+export function fetchPerformanceConfig(): Promise<PerformanceConfig> {
+  return getJson("/api/config");
+}
+
+export function setPerformanceConfig(patch: Partial<Omit<PerformanceConfig, "cpuCoreCount">>): Promise<PerformanceConfig> {
+  return putJson("/api/config", patch);
+}
+
 type JobEvent = { type: "snapshot"; jobs: JobInfo[] } | { type: "update"; job: JobInfo };
 
 /** Subscribes to live job progress over SSE. Returns an unsubscribe function. */

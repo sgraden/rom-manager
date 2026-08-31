@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { randomFillSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { JobQueue, type ToolPaths } from "./queue.js";
 import type { PlannedJob } from "../library/plan.js";
 import { detectTools } from "../convert/tools.js";
+import { STAGING_DIR } from "../lib/paths.js";
 
 // This test suite runs real chdman/7zz conversions end to end. It only ever
 // writes into a scratch temp directory standing in as a "target" — never
@@ -56,6 +58,26 @@ function makeDvdData(filePath: string, sectors = 20): void {
   writeFileSync(filePath, Buffer.alloc(sectors * 2048));
 }
 
+/** A larger, real-content CD track (not degenerate/all-zero) — takes chdman long enough to observe two jobs overlapping. */
+function makeSlowCdTrack(dir: string, name: string, sectors: number): { cuePath: string } {
+  const binPath = path.join(dir, `${name}.bin`);
+  const sectorSize = 2352;
+  const data = Buffer.alloc(sectors * sectorSize);
+  for (let s = 0; s < sectors; s++) {
+    const off = s * sectorSize;
+    data[off] = 0x00;
+    data.fill(0xff, off + 1, off + 11);
+    data[off + 11] = 0x00;
+    data[off + 15] = 0x01; // MODE1
+    randomFillSync(data, off + 16, sectorSize - 16);
+  }
+  writeFileSync(binPath, data);
+
+  const cuePath = path.join(dir, `${name}.cue`);
+  writeFileSync(cuePath, `FILE "${name}.bin" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n`);
+  return { cuePath };
+}
+
 function waitForTerminal(queue: JobQueue, id: string, timeoutMs = 15000): Promise<ReturnType<JobQueue["get"]>> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -92,6 +114,54 @@ function fakePlannedJob(overrides: Partial<PlannedJob> & { sourcePath: string })
 }
 
 describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
+  maybeIt("actually runs two jobs concurrently when maxConcurrentJobs is 2, not just sequentially", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+
+    // Real (non-degenerate) content, big enough that chdman takes a real moment —
+    // long enough to poll and observe both jobs "running" at the same time.
+    const discA = makeSlowCdTrack(srcDir, "Concurrent A", 20000);
+    const discB = makeSlowCdTrack(srcDir, "Concurrent B", 20000);
+
+    const queue = new JobQueue(
+      () => 2,
+      () => false,
+      () => toolPaths,
+      () => false,
+      () => 0,
+    );
+
+    const jobA = queue.enqueue(
+      fakePlannedJob({ sourcePath: discA.cuePath, destinationFolder: path.join(destDir, "psx"), destinationFilename: "A.chd" }),
+    );
+    const jobB = queue.enqueue(
+      fakePlannedJob({ sourcePath: discB.cuePath, destinationFolder: path.join(destDir, "psx"), destinationFilename: "B.chd" }),
+    );
+
+    let sawBothRunning = false;
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const a = queue.get(jobA.id);
+      const b = queue.get(jobB.id);
+      if (a?.state === "running" && b?.state === "running") {
+        sawBothRunning = true;
+        break;
+      }
+      const aDone = a?.state === "done" || a?.state === "failed";
+      const bDone = b?.state === "done" || b?.state === "failed";
+      if (aDone && bDone) break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+
+    expect(sawBothRunning).toBe(true);
+
+    const finishedA = await waitForTerminal(queue, jobA.id);
+    const finishedB = await waitForTerminal(queue, jobB.id);
+    expect(finishedA?.state).toBe("done");
+    expect(finishedB?.state).toBe("done");
+  });
+
   maybeIt("converts a cue+bin disc to a verified CHD and writes it atomically", async () => {
     const srcDir = makeTempDir();
     const destDir = makeTempDir();
@@ -181,6 +251,174 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     expect(finished?.state).toBe("done");
     expect(finished?.error).toBeNull();
     expect(existsSync(path.join(destDir, "ps2", "Weird PS2 Dump.chd"))).toBe(true);
+  });
+
+  maybeIt("deletes a staged upload's source file after a successful job", async () => {
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const stagedPath = path.join(STAGING_DIR, `queue-test-${Date.now()}-game.nes`);
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(stagedPath, romBuf);
+
+    try {
+      const queue = new JobQueue(
+        () => 1,
+        () => true,
+        () => toolPaths,
+        () => false, // deleteSourceAfterSuccess is irrelevant for staged copies — they're always cleaned up
+      );
+      const job = queue.enqueue(
+        fakePlannedJob({
+          sourcePath: stagedPath,
+          selectedSystemId: "nes",
+          action: "keep-zip",
+          destinationFolder: path.join(destDir, "nes"),
+          destinationFilename: "game.zip",
+        }),
+      );
+
+      const finished = await waitForTerminal(queue, job.id);
+      expect(finished?.state).toBe("done");
+      expect(existsSync(stagedPath)).toBe(false);
+    } finally {
+      rmSync(stagedPath, { force: true });
+    }
+  });
+
+  maybeIt("removes the per-upload directory too, and never renames the file (no UUID leaking into the destination)", async () => {
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    // Mirrors the real upload layout from stagedUploadPath: staging/<uuid>/<original name>.
+    const uploadDir = path.join(STAGING_DIR, `queue-test-upload-${Date.now()}`);
+    mkdirSync(uploadDir, { recursive: true });
+    const stagedPath = path.join(uploadDir, "Dark Cloud 2 (USA) (v2.00).zip");
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(stagedPath, romBuf);
+
+    try {
+      const queue = new JobQueue(
+        () => 1,
+        () => true,
+        () => toolPaths,
+        () => false,
+      );
+      const job = queue.enqueue(
+        fakePlannedJob({
+          sourcePath: stagedPath,
+          selectedSystemId: "nes",
+          action: "keep-zip",
+          destinationFolder: path.join(destDir, "nes"),
+          destinationFilename: "Dark Cloud 2 (USA) (v2.00).zip",
+        }),
+      );
+
+      const finished = await waitForTerminal(queue, job.id);
+      expect(finished?.state).toBe("done");
+      // The destination filename is exactly the original name — no id ever touched it.
+      expect(existsSync(path.join(destDir, "nes", "Dark Cloud 2 (USA) (v2.00).zip"))).toBe(true);
+      expect(existsSync(stagedPath)).toBe(false);
+      expect(existsSync(uploadDir)).toBe(false);
+    } finally {
+      rmSync(uploadDir, { recursive: true, force: true });
+    }
+  });
+
+  maybeIt("keeps a staged upload's source file if the job fails", async () => {
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+    const existingPath = path.join(destDir, "psx", "Existing.chd");
+    writeFileSync(existingPath, "pre-existing content");
+
+    const stagedPath = path.join(STAGING_DIR, `queue-test-fail-${Date.now()}.cue`);
+    writeFileSync(stagedPath, 'FILE "nope.bin" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n');
+
+    try {
+      const queue = new JobQueue(
+        () => 1,
+        () => true,
+        () => toolPaths,
+        () => false,
+      );
+      const job = queue.enqueue(
+        fakePlannedJob({
+          sourcePath: stagedPath,
+          destinationFolder: path.join(destDir, "psx"),
+          destinationFilename: "Existing.chd",
+        }),
+      );
+
+      const finished = await waitForTerminal(queue, job.id);
+      expect(finished?.state).toBe("failed");
+      expect(existsSync(stagedPath)).toBe(true);
+    } finally {
+      rmSync(stagedPath, { force: true });
+    }
+  });
+
+  maybeIt("does not delete a path-based source by default after success", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const romPath = path.join(srcDir, "game.nes");
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(romPath, romBuf);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+      () => false,
+    );
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: romPath,
+        selectedSystemId: "nes",
+        action: "keep-zip",
+        destinationFolder: path.join(destDir, "nes"),
+        destinationFilename: "game.zip",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(existsSync(romPath)).toBe(true);
+  });
+
+  maybeIt("deletes a path-based source after success when deleteSourceAfterSuccess is enabled", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const romPath = path.join(srcDir, "game.nes");
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(romPath, romBuf);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+      () => true,
+    );
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: romPath,
+        selectedSystemId: "nes",
+        action: "keep-zip",
+        destinationFolder: path.join(destDir, "nes"),
+        destinationFilename: "game.zip",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(existsSync(romPath)).toBe(false);
   });
 
   maybeIt("zips a raw cartridge ROM for a keep-zip action", async () => {

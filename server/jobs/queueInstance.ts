@@ -18,4 +18,6 @@ export const jobQueue = new JobQueue(
       dolphinToolPath: dolphinTool?.found ? dolphinTool.path : null,
     };
   },
+  () => loadConfig().deleteSourceAfterSuccess,
+  () => loadConfig().reservedCpuCores,
 );

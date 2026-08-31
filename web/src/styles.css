@@ -157,6 +157,22 @@ input[type="text"] {
   margin-bottom: 6px;
 }
 
+.performance-settings .field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.performance-settings .field-row label {
+  width: 200px;
+  font-size: 13px;
+}
+
+.performance-settings input[type="number"] {
+  width: 70px;
+}
+
 .drop-page section,
 .review-page > * {
   margin-bottom: 24px;

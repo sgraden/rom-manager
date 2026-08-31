@@ -10,6 +10,7 @@ import {
   createWriteStream,
   renameSync,
   unlinkSync,
+  rmdirSync,
   writeFileSync,
   readFileSync,
   readdirSync,
@@ -25,6 +26,9 @@ import { CancelledError } from "../convert/errors.js";
 import { groupForM3u, m3uFilenameFor, m3uContent } from "../convert/m3u.js";
 import { parseCueFile, parseGdiFile, resolveCcdCompanions } from "../detect/cuesheet.js";
 import { getFreeBytes } from "../library/targets.js";
+import { isPathInside, estimateOutputBytes } from "../library/fsutil.js";
+import { threadsPerJob } from "../library/cpuBudget.js";
+import { STAGING_DIR } from "../lib/paths.js";
 import type { Job } from "./types.js";
 
 export interface ToolPaths {
@@ -70,13 +74,26 @@ export class JobQueue extends EventEmitter {
   private running = new Set<string>();
   private processes = new Map<string, ChildProcess>();
   private cancelRequested = new Set<string>();
+  private reservedBytes = new Map<string, number>();
 
   constructor(
     private getMaxConcurrent: () => number,
     private getVerifyEnabled: () => boolean,
     private getTools: () => ToolPaths,
+    private getDeleteSourceAfterSuccess: () => boolean = () => false,
+    private getReservedCores: () => number = () => 0,
   ) {
     super();
+  }
+
+  /**
+   * Per-job thread cap, so N concurrent conversions never collectively use
+   * more than (available cores - reservedCores). Uses the current running
+   * count (which includes this job, since it's called from inside runJob)
+   * so a single job left running alone gets the full remaining budget.
+   */
+  private currentThreadBudget(): number {
+    return threadsPerJob(Math.max(1, this.running.size), this.getReservedCores());
   }
 
   list(): Job[] {
@@ -142,6 +159,11 @@ export class JobQueue extends EventEmitter {
 
   private emitUpdate(job: Job) {
     this.emit("update", { ...job });
+  }
+
+  /** Re-checks whether more queued jobs can start now — call after raising maxConcurrentJobs, since nothing else re-triggers this on its own. */
+  recheckCapacity(): void {
+    this.pump();
   }
 
   private pump() {
@@ -251,14 +273,14 @@ export class JobQueue extends EventEmitter {
         await extractArchiveAsync(tools.sevenZipPath, job.sourcePath, dir, { registerProcess });
         const inner = findFirstFile(dir);
         if (!inner) throw new Error("Archive did not contain a usable file.");
-        await createZip(tools.sevenZipPath, inner, partPath, { registerProcess, onProgress });
+        await createZip(tools.sevenZipPath, inner, partPath, { registerProcess, onProgress, threads: this.currentThreadBudget() });
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
       return;
     }
 
-    await createZip(tools.sevenZipPath, job.sourcePath, partPath, { registerProcess, onProgress });
+    await createZip(tools.sevenZipPath, job.sourcePath, partPath, { registerProcess, onProgress, threads: this.currentThreadBudget() });
   }
 
   private async runJob(id: string): Promise<void> {
@@ -278,10 +300,27 @@ export class JobQueue extends EventEmitter {
         throw new Error(`A file already exists at ${job.destinationPath} — remove or rename it first.`);
       }
 
+      // With concurrency > 1, a free-space check in isolation could pass for
+      // several jobs that collectively overrun the card, since none of them
+      // know about the others' in-flight writes. Account for bytes already
+      // reserved by other currently-running jobs before deciding this one fits.
+      // This whole block is synchronous (no `await`), so it can't race with
+      // another job's runJob() — Node won't interleave them mid-check.
+      const estimatedBytes = estimateOutputBytes(job.sourceBytes, job.action);
       const freeBytes = getFreeBytes(job.destinationFolder);
-      if (freeBytes !== null && freeBytes < 5 * 1024 * 1024) {
-        throw new Error(`Destination is nearly out of space (${Math.round(freeBytes / 1024)} KB free) — aborting before writing.`);
+      if (freeBytes !== null) {
+        let reservedByOthers = 0;
+        for (const [otherId, bytes] of this.reservedBytes) {
+          if (otherId !== id) reservedByOthers += bytes;
+        }
+        const effectiveFree = freeBytes - reservedByOthers;
+        if (effectiveFree < estimatedBytes + 5 * 1024 * 1024) {
+          throw new Error(
+            `Not enough free space for this job (~${Math.round(estimatedBytes / 1024 / 1024)} MB estimated, ~${Math.round(effectiveFree / 1024 / 1024)} MB available once other running jobs are accounted for).`,
+          );
+        }
       }
+      this.reservedBytes.set(id, estimatedBytes);
 
       const tools = this.getTools();
       const registerProcess = (child: ChildProcess) => this.processes.set(id, child);
@@ -304,6 +343,7 @@ export class JobQueue extends EventEmitter {
             onProgress,
             registerProcess,
             cwd: inputDir,
+            threads: this.currentThreadBudget(),
           });
           if (this.getVerifyEnabled()) {
             if (this.cancelRequested.has(id)) throw new CancelledError();
@@ -351,6 +391,7 @@ export class JobQueue extends EventEmitter {
       job.phase = "done";
       job.finishedAt = new Date().toISOString();
       this.emitUpdate(job);
+      this.cleanupSource(job);
     } catch (err) {
       this.processes.delete(id);
       if (existsSync(partPath)) {
@@ -371,6 +412,7 @@ export class JobQueue extends EventEmitter {
       this.emitUpdate(job);
     } finally {
       this.cancelRequested.delete(id);
+      this.reservedBytes.delete(id);
       if (tmpDir) {
         try {
           rmSync(tmpDir, { recursive: true, force: true });
@@ -378,6 +420,31 @@ export class JobQueue extends EventEmitter {
           // best effort
         }
       }
+    }
+  }
+
+  /**
+   * Removes the source file after a successful write. A staged upload
+   * (staging/) is the app's own internal copy — always safe to delete once
+   * the destination write succeeds. A path-based source is the user's own
+   * file elsewhere on disk, so it's only touched when they've explicitly
+   * opted into deleteSourceAfterSuccess.
+   */
+  private cleanupSource(job: Job): void {
+    const isStagedCopy = isPathInside(job.sourcePath, STAGING_DIR);
+    if (!isStagedCopy && !this.getDeleteSourceAfterSuccess()) return;
+    try {
+      unlinkSync(job.sourcePath);
+      if (isStagedCopy) {
+        // Each upload gets its own UUID subdirectory (see stagedUploadPath) — remove it
+        // too now that it's empty. rmdirSync only succeeds on an empty directory, so
+        // this is a safe no-op for anything else (including pre-existing flat-layout
+        // staged files, whose parent is STAGING_DIR itself and is never removed here).
+        const parentDir = path.dirname(job.sourcePath);
+        if (parentDir !== STAGING_DIR) rmdirSync(parentDir);
+      }
+    } catch {
+      // best effort — a leftover source file or directory is harmless
     }
   }
 

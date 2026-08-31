@@ -19,6 +19,7 @@ function fakeConfig(overrides: AppConfig["targetFolderMaps"] = {}): AppConfig {
   return {
     port: 3001,
     maxConcurrentJobs: 1,
+    reservedCpuCores: 2,
     verifyAfterConvert: true,
     deleteSourceAfterSuccess: false,
     additionalTargetPaths: [],

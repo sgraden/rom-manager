@@ -16,6 +16,19 @@ const STATE_LABEL: Record<JobInfo["state"], string> = {
   cancelled: "Cancelled",
 };
 
+function SizeCell({ job }: { job: JobInfo }) {
+  if (job.state !== "done" || job.resultBytes === null) {
+    return <>{formatBytes(job.sourceBytes)}</>;
+  }
+  const reduction = job.sourceBytes > 0 ? Math.round((1 - job.resultBytes / job.sourceBytes) * 100) : 0;
+  return (
+    <>
+      {formatBytes(job.sourceBytes)} → {formatBytes(job.resultBytes)}
+      {reduction !== 0 && <div className="muted">{reduction > 0 ? `${reduction}% smaller` : `${-reduction}% larger`}</div>}
+    </>
+  );
+}
+
 function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => void }) {
   return (
     <tr className={job.state === "failed" ? "row-error" : ""}>
@@ -40,7 +53,9 @@ function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => voi
         {job.error && <div className="warning-line">⚠ {job.error}</div>}
         {job.m3uWritten && <div className="muted">Playlist written: {job.m3uWritten}</div>}
       </td>
-      <td>{formatBytes(job.resultBytes)}</td>
+      <td>
+        <SizeCell job={job} />
+      </td>
       <td>
         {(job.state === "queued" || job.state === "running") && <button onClick={() => onCancel(job.id)}>Cancel</button>}
       </td>
@@ -97,7 +112,7 @@ export function QueuePage() {
             <th>Action</th>
             <th>Destination</th>
             <th>Status</th>
-            <th>Size</th>
+            <th>Size before → after</th>
             <th></th>
           </tr>
         </thead>

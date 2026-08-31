@@ -1,8 +1,8 @@
 import express, { Router } from "express";
-import { createWriteStream, existsSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { STAGING_DIR } from "../lib/paths.js";
+import { stagedUploadPath } from "../library/fsutil.js";
 
 export const ingestRouter = Router();
 
@@ -14,8 +14,8 @@ ingestRouter.post("/upload", (req, res) => {
     return;
   }
 
-  const safeName = path.basename(rawName);
-  const destPath = path.join(STAGING_DIR, `${randomUUID()}-${safeName}`);
+  const { filePath: destPath, uploadDir, safeName } = stagedUploadPath(STAGING_DIR, rawName);
+  mkdirSync(uploadDir, { recursive: true });
   const writeStream = createWriteStream(destPath);
 
   let bytesWritten = 0;

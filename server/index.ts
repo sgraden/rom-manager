@@ -11,6 +11,7 @@ import { browseRouter } from "./routes/browse.js";
 import { planRouter } from "./routes/plan.js";
 import { systemsRouter } from "./routes/systems.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { configRouter } from "./routes/config.js";
 import { WEB_DIST_DIR } from "./lib/paths.js";
 
 const config = loadConfig();
@@ -29,6 +30,7 @@ app.use("/api/browse", browseRouter);
 app.use("/api/plan", planRouter);
 app.use("/api/systems", systemsRouter);
 app.use("/api/jobs", jobsRouter);
+app.use("/api/config", configRouter);
 
 // In production (or whenever a build exists), serve the built web app and let
 // it handle client-side routes. In dev, Vite's own server does this instead

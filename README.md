@@ -105,7 +105,7 @@ On first run the app creates a few files and folders that are **not** part of th
 | `config/config.json` | Your settings — destination folder mappings, tool path overrides, per-system action overrides. Generated from `config/config.example.json` on first run. |
 | `config/dats/` | Drop No-Intro/Redump `.dat` files here to enable exact-name matching later (see [Roadmap](#roadmap)). Empty is fine — the app works fully without any. |
 | `data/library.json` | Reserved for Phase 5 (library hashing) — not written yet. |
-| `staging/` | Temporary holding area for uploads while they're being processed. |
+| `staging/` | Temporary holding area for uploads while they're being processed — deleted automatically once a job using them succeeds (see below). |
 
 None of this needs to be backed up to get the app working on a new machine — it all regenerates.
 If you *do* want to carry your settings or library history to a new machine, copy those files
@@ -145,8 +145,10 @@ name is editable before creating.
 
 1. **Drop tab** — pick a destination, then add files either by dragging them in (streamed
    straight to `staging/`, never buffered in memory — safe for huge disc images), or via
-   "Add by path" / the built-in folder browser for files already on disk (no copy). Click
-   **Build Plan** — nothing is written yet.
+   "Add by path" / the built-in folder browser for files already on disk (no copy). A dragged-in
+   file's original name is always preserved exactly — each upload gets its own internal id
+   directory rather than an id-prefixed filename, so that id never leaks into the destination
+   filename. Click **Build Plan** — nothing is written yet.
 2. **Review tab** — each file shows its detected system (with the evidence behind the guess), the
    action that will run on it, its destination path, and any warnings (name collision, low
    detection confidence, no folder mapped, not enough free space). Override the system or action
@@ -156,7 +158,9 @@ name is editable before creating.
    standard name for that system — click it and the row resolves immediately. Click **Process** to
    start converting and writing the rows that resolved cleanly.
 3. **Queue tab** — live progress per file (streamed over SSE), with a Cancel button while a job is
-   queued or running. A cancelled or failed job never leaves a partial file at the destination.
+   queued or running. Each row shows source size → final size and the compression reduction once
+   done. A cancelled or failed job never leaves a partial file at the destination. Depending on
+   your Performance settings, more than one file can be converting here at once.
 
 **What each action actually does:**
 
@@ -172,6 +176,16 @@ the first sector's header) before conversion. A multi-disc set — files whose n
 a `(Disc N)`/`(Disk N)`/`(CD N)` token — gets a `.m3u` playlist written alongside them once every
 disc in the set is done.
 
+**Source cleanup after a successful job:**
+- A **dragged-in upload** (staged under `staging/`) is always deleted once its job succeeds — it's
+  the app's own internal copy, so there's nothing to preserve. A failed job leaves it in place
+  (nothing was written at the destination, so there's no reason to lose your only copy).
+- A **path-based source** ("Add by path" / the folder browser) is your own file living elsewhere
+  on disk, so it's left alone by default. Set `"deleteSourceAfterSuccess": true` in
+  `config/config.json` if you want those removed too after a successful conversion — useful if
+  your workflow is "convert, then free up space on the Mac." Off by default; only applies on
+  success, never on a failed or cancelled job.
+
 **DolphinTool caveat:** the RVZ wrapper (`server/convert/dolphin.ts`) is written against
 DolphinTool's documented CLI but hasn't been run against a real DolphinTool binary — it isn't
 installed on the machine this was built on. If you install Dolphin and hit an RVZ conversion
@@ -181,6 +195,26 @@ error, check the exact flags with `DolphinTool convert --help` first.
 live in that tab's local state — navigating to Queue or Drop and back to Review resets the table
 to the original auto-detected plan. Re-apply any manual system/action overrides after switching
 tabs and back, or process before switching away.
+
+## Performance: concurrent conversions
+
+**Settings → Performance** controls how many files convert at once (`maxConcurrentJobs`, default
+2) and how many CPU cores stay reserved for everything else on the Mac (`reservedCpuCores`,
+default 2). Both take effect live — no restart needed, and raising the concurrency limit starts
+additional queued jobs immediately.
+
+This isn't a reactive "watch system load and throttle" monitor — that approach has a real flaw:
+`chdman` already multithreads aggressively within a single job (500%+ CPU isn't unusual), so a
+naive monitor would read our own jobs' expected load as "no headroom" and throttle itself right
+back down. Instead, each conversion is capped to a deterministic thread budget —
+`(available cores − reservedCpuCores) ÷ concurrency`, passed directly to `chdman -np` / `7zz -mmt`
+— so the reservation holds structurally regardless of how many jobs are running. Confirmed
+directly: an uncapped `chdman` job hit ~557% CPU in testing; the same job with `-np 2` stayed
+around ~108%, and two jobs capped this way ran genuinely concurrently (not sequentially) while
+each staying within budget.
+
+`chdman verify` doesn't take a thread-count flag, so verification always runs at its own pace
+regardless of this setting.
 
 ## System detection
 

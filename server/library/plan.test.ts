@@ -28,6 +28,7 @@ function fakeConfig(): AppConfig {
     toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
     targetFolderMaps: {},
     systemActionOverrides: {},
+    lastTargetName: null,
   };
 }
 
@@ -119,7 +120,7 @@ describe("buildPlan", () => {
 
     const [job] = buildPlan([romPath], target, fakeConfig(), { sevenZipPath: null });
     expect(job.destinationFolder).toBeNull();
-    expect(job.warnings.some((w) => w.includes("No destination folder mapped"))).toBe(true);
+    expect(job.warnings.some((w) => w.text.includes("No destination folder mapped"))).toBe(true);
   });
 
   it("warns on a destination filename collision", () => {
@@ -141,7 +142,7 @@ describe("buildPlan", () => {
     };
 
     const [job] = buildPlan([romPath], target, fakeConfig(), { sevenZipPath: null });
-    expect(job.warnings.some((w) => w.includes("already exists"))).toBe(true);
+    expect(job.warnings.some((w) => w.text.includes("already exists"))).toBe(true);
   });
 
   it("warns when estimated output exceeds free space", () => {
@@ -162,7 +163,7 @@ describe("buildPlan", () => {
     };
 
     const [job] = buildPlan([romPath], target, fakeConfig(), { sevenZipPath: null });
-    expect(job.warnings.some((w) => w.includes("exceeds free space"))).toBe(true);
+    expect(job.warnings.some((w) => w.text.includes("exceeds free space"))).toBe(true);
   });
 
   it("applies a manual system/action override and clears the low-confidence warning", () => {
@@ -188,7 +189,7 @@ describe("buildPlan", () => {
 
     expect(job.selectedSystemId).toBe("snes");
     expect(job.action).toBe("keep-zip");
-    expect(job.warnings.some((w) => w.includes("Could not identify"))).toBe(false);
+    expect(job.warnings.some((w) => w.text.includes("Could not identify"))).toBe(false);
   });
 
   it("prefers chd-cd over the chd-dvd default when a PS2 image's size is CD-sector-aligned", () => {
@@ -215,7 +216,7 @@ describe("buildPlan", () => {
 
     expect(job.selectedSystemId).toBe("ps2");
     expect(job.action).toBe("chd-cd");
-    expect(job.warnings.some((w) => w.includes("CD-mode PS2 dump"))).toBe(true);
+    expect(job.warnings.some((w) => w.text.includes("CD-mode PS2 dump"))).toBe(true);
   });
 
   it("leaves a DVD-sector-aligned PS2 image on the default chd-dvd action", () => {
@@ -240,7 +241,7 @@ describe("buildPlan", () => {
 
     expect(job.selectedSystemId).toBe("ps2");
     expect(job.action).toBe("chd-dvd");
-    expect(job.warnings.some((w) => w.includes("CD-mode PS2 dump"))).toBe(false);
+    expect(job.warnings.some((w) => w.text.includes("CD-mode PS2 dump"))).toBe(false);
   });
 
   it("respects a manually chosen action even when the CD-sector heuristic would otherwise override it", () => {
@@ -328,10 +329,63 @@ describe("buildPlan", () => {
     const [missing, good] = jobs;
     expect(missing.selectedSystemId).toBeNull();
     expect(missing.sourceKind).toBe("unknown");
-    expect(missing.warnings.some((w) => w.includes("Could not inspect this file"))).toBe(true);
+    expect(missing.warnings.some((w) => w.text.includes("Could not inspect this file"))).toBe(true);
 
     // The readable file is planned exactly as it would have been on its own.
     expect(good.selectedSystemId).toBe("nes");
     expect(good.destinationFilename).toBe("good.zip");
+  });
+
+  it("labels warnings by severity and puts blockers first", () => {
+    const root = makeTempDir();
+    const romRoot = path.join(root, "roms");
+    mkdirSync(romRoot, { recursive: true });
+    const romPath = makeNesRom(root);
+
+    const target: TargetInfo = {
+      name: "TESTCARD",
+      path: root,
+      romRoot,
+      freeBytes: 10, // too small — a blocker
+      totalBytes: 1000,
+      fsType: "exfat",
+      writable: false, // also a blocker
+      folders: [], // no mapped folder — another blocker
+    };
+
+    const [job] = buildPlan([romPath], target, fakeConfig(), { sevenZipPath: null });
+
+    expect(job.warnings.length).toBeGreaterThan(0);
+    for (const warning of job.warnings) {
+      expect(["info", "warning", "blocker"]).toContain(warning.level);
+    }
+    // Blockers lead, so the reason the row can't run is read first.
+    const levels = job.warnings.map((w) => w.level);
+    expect(levels[0]).toBe("blocker");
+    expect([...levels].sort((a, b) => ({ blocker: 0, warning: 1, info: 2 })[a] - ({ blocker: 0, warning: 1, info: 2 })[b])).toEqual(levels);
+  });
+
+  it("treats an automatic action correction as info, not a warning", () => {
+    const root = makeTempDir();
+    const romRoot = path.join(root, "roms");
+    mkdirSync(path.join(romRoot, "ps2"), { recursive: true });
+    const isoPath = path.join(root, "CD Mode PS2 (USA).iso");
+    writeFileSync(isoPath, buildPs2Iso9660Image(300 * 2352));
+
+    const target: TargetInfo = {
+      name: "TESTCARD",
+      path: root,
+      romRoot,
+      freeBytes: 1_000_000_000,
+      totalBytes: 2_000_000_000,
+      fsType: "exfat",
+      writable: true,
+      folders: ["ps2"],
+    };
+
+    const [job] = buildPlan([isoPath], target, fakeConfig(), { sevenZipPath: null });
+    const corrected = job.warnings.find((w) => w.text.includes("CD-mode PS2 dump"));
+    // The app already handled it; it's a note about a decision, not a problem.
+    expect(corrected?.level).toBe("info");
   });
 });

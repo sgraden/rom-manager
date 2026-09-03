@@ -10,12 +10,14 @@ import {
   type ConvertAction,
   type PlanOverride,
   type DuplicateMatch,
+  type WarningLevel,
 } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
 import { ErrorPanel } from "../ErrorPanel";
 import { toAppError, type AppError, type RemedyKind } from "../AppError";
 import { Spinner } from "../Spinner";
 import { ActionBar } from "../ActionBar";
+import { formatBytes, formatDate } from "../format";
 
 const ACTIONS: ConvertAction[] = ["chd-cd", "chd-dvd", "rvz", "keep-zip", "copy"];
 
@@ -27,13 +29,6 @@ const ACTION_EXPLANATION: Record<ConvertAction, string> = {
   copy: "Computer disk images and arcade sets — copied as-is; recompressing would break the structure the emulator expects.",
 };
 
-function formatBytes(bytes: number | null): string {
-  if (bytes === null) return "—";
-  const mb = bytes / 1024 ** 2;
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  return `${mb.toFixed(1)} MB`;
-}
-
 /**
  * The destination shown as "folder/filename" rather than its full absolute path.
  * The prefix is identical on every row and already stated in the banner above the
@@ -44,15 +39,18 @@ function shortDestination(folder: string, filename: string): string {
   return `${folder.split("/").filter(Boolean).pop() ?? folder}/${filename}`;
 }
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
-
 /**
  * How the duplicate was identified. Surfaced verbatim next to the choice, because
  * "identical contents" and "similar filename" deserve very different confidence
  * before someone overwrites a file.
  */
+/**
+ * Warnings are not equal: "low-confidence match" is worth a glance, "not enough free
+ * space" means the job cannot run. Rendering both as an identical "⚠" made the row
+ * impossible to triage.
+ */
+const WARNING_ICON: Record<WarningLevel, string> = { blocker: "⛔", warning: "⚠", info: "ⓘ" };
+
 const TIER_LABEL: Record<DuplicateMatch["tier"], string> = {
   exact: "identical contents",
   likely: "same game (DAT match)",
@@ -298,7 +296,7 @@ export function ReviewPage({
   if (jobs.length === 0) {
     return (
       <div className="review-page">
-        <p className="muted">Nothing to review yet — queue and plan some files on the Drop tab first.</p>
+        <p className="muted">Nothing to review yet — select some ROMs on the Drop tab and build a plan first.</p>
       </div>
     );
   }
@@ -351,7 +349,7 @@ export function ReviewPage({
         </div>
       )}
       {busy && (
-        <p className="inline-status">
+        <p className="inline-status" aria-live="polite">
           <Spinner />
           {slowBusy ? "Still working — re-checking the destination takes a moment." : "Re-planning…"}
         </p>
@@ -375,7 +373,14 @@ export function ReviewPage({
           {jobs.map((job) => (
             <tr
               key={job.sourcePath}
-              className={[decisions[job.sourcePath] === "skip" ? "plan-row-skipped" : "", job.warnings.length > 0 ? "plan-row-warn" : ""]
+              className={[
+                decisions[job.sourcePath] === "skip" ? "plan-row-skipped" : "",
+                job.warnings.some((w) => w.level === "blocker")
+                  ? "plan-row-blocked"
+                  : job.warnings.some((w) => w.level === "warning")
+                    ? "plan-row-warn"
+                    : "",
+              ]
                 .filter(Boolean)
                 .join(" ")}
             >
@@ -448,8 +453,8 @@ export function ReviewPage({
               </td>
               <td data-label="Warnings">
                 {job.warnings.map((w, i) => (
-                  <div key={i} className="warning-line">
-                    ⚠ {w}
+                  <div key={i} className={`warning-line warning-${w.level}`}>
+                    {WARNING_ICON[w.level]} {w.text}
                   </div>
                 ))}
               </td>
@@ -467,7 +472,7 @@ export function ReviewPage({
               {slowProcessing ? "Still working — enqueueing a lot of files takes a moment." : "Starting jobs…"}
             </span>
           ) : (
-            <span className="muted">
+            <span className="muted" aria-live="polite">
               {readyCount} of {jobs.length} file{jobs.length === 1 ? "" : "s"} ready to process
               {skippedCount > 0 ? `, ${skippedCount} skipped as already on the card` : ""}.
             </span>

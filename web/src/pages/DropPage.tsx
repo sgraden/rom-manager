@@ -1,26 +1,28 @@
-import { useEffect, useState, useCallback } from "react";
-import { fetchTargets, ingestPath, uploadFile, browseNative, planJobs, type TargetInfo, type PlannedJob } from "../api";
+import { useEffect, useState } from "react";
+import { fetchTargets, ingestPath, browseNative, planJobs, setLastUsedTarget, type TargetInfo, type PlannedJob } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
 import { ErrorPanel } from "../ErrorPanel";
 import { toAppError, type AppError, type RemedyKind } from "../AppError";
 import { Spinner } from "../Spinner";
 import { ActionBar } from "../ActionBar";
+import { formatBytes } from "../format";
 
 interface QueuedSource {
-  key: string;
   path: string;
   name: string;
   size: number;
-  status: "ready" | "uploading";
-  progress?: number;
 }
 
-function formatBytes(bytes: number): string {
-  const mb = bytes / 1024 ** 2;
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  return `${mb.toFixed(1)} MB`;
-}
-
+/**
+ * Picks the files to process.
+ *
+ * Everything here works from a path, never a copy. Browser drag-and-drop and
+ * `<input type="file">` cannot give a page a real filesystem path — they hand over
+ * file *contents*, which meant uploading a whole disc image into staging/ just to
+ * convert it and delete it again. For multi-gigabyte ROMs that's a pointless write of
+ * the entire library. The macOS open panel returns real paths, so the file is read
+ * where it already lives.
+ */
 export function DropPage({
   onPlanned,
   onRemedy,
@@ -32,80 +34,59 @@ export function DropPage({
   const [targetName, setTargetName] = useState<string>("");
   const [sources, setSources] = useState<QueuedSource[]>([]);
   const [pathInput, setPathInput] = useState("");
+  const [showPathInput, setShowPathInput] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [planning, setPlanning] = useState(false);
   const slowPlanning = useSlowFlag(planning);
-  const [dragActive, setDragActive] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
+  const [selecting, setSelecting] = useState(false);
 
   useEffect(() => {
     fetchTargets()
       .then((r) => {
         setTargets(r.targets);
-        if (r.targets.length > 0) setTargetName(r.targets[0].name);
+        // Prefer the destination used last time; it's stored server-side so it survives
+        // a reload, and someone with two cards mounted shouldn't re-pick on every visit.
+        const remembered = r.targets.find((t) => t.name === r.lastUsed);
+        if (remembered) setTargetName(remembered.name);
+        else if (r.targets.length > 0) setTargetName(r.targets[0].name);
       })
       .catch((e) => setError(toAppError(e)));
   }, []);
 
-  function addIngested(file: { path: string; name: string; size: number }) {
+  function addSources(files: Array<{ path: string; name: string; size: number }>) {
     setSources((prev) => {
-      if (prev.some((s) => s.path === file.path)) return prev;
-      return [...prev, { key: file.path, path: file.path, name: file.name, size: file.size, status: "ready" }];
+      const seen = new Set(prev.map((s) => s.path));
+      const added = files.filter((f) => !seen.has(f.path));
+      return [...prev, ...added];
     });
+  }
+
+  async function handleSelectFiles() {
+    setError(null);
+    setSelecting(true);
+    try {
+      const { files } = await browseNative();
+      addSources(files);
+    } catch (e) {
+      setError(toAppError(e));
+    } finally {
+      setSelecting(false);
+    }
   }
 
   async function handleAddPath() {
     if (!pathInput.trim()) return;
     setError(null);
     try {
-      const file = await ingestPath(pathInput.trim());
-      addIngested(file);
+      addSources([await ingestPath(pathInput.trim())]);
       setPathInput("");
     } catch (e) {
       setError(toAppError(e));
     }
   }
 
-  async function handleUpload(file: globalThis.File) {
-    const key = `upload:${file.name}:${file.size}:${Date.now()}`;
-    setSources((prev) => [...prev, { key, path: "", name: file.name, size: file.size, status: "uploading", progress: 0 }]);
-    try {
-      const result = await uploadFile(file, (sent, total) => {
-        setSources((prev) => prev.map((s) => (s.key === key ? { ...s, progress: total ? sent / total : 0 } : s)));
-      });
-      setSources((prev) =>
-        prev.map((s) => (s.key === key ? { key: result.path, path: result.path, name: result.name, size: result.size, status: "ready" } : s)),
-      );
-    } catch (e) {
-      setError(toAppError(e));
-      setSources((prev) => prev.filter((s) => s.key !== key));
-    }
-  }
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragActive(false);
-    for (const file of Array.from(e.dataTransfer.files)) {
-      handleUpload(file);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function removeSource(key: string) {
-    setSources((prev) => prev.filter((s) => s.key !== key));
-  }
-
-  async function handleBrowseNative() {
-    setError(null);
-    setBrowsing(true);
-    try {
-      const { files } = await browseNative();
-      for (const file of files) addIngested(file);
-    } catch (e) {
-      setError(toAppError(e));
-    } finally {
-      setBrowsing(false);
-    }
+  function removeSource(path: string) {
+    setSources((prev) => prev.filter((s) => s.path !== path));
   }
 
   async function handleBuildPlan() {
@@ -113,8 +94,10 @@ export function DropPage({
     setPlanning(true);
     setError(null);
     try {
-      const readyPaths = sources.filter((s) => s.status === "ready").map((s) => s.path);
-      const { jobs } = await planJobs(readyPaths, targetName);
+      const { jobs } = await planJobs(
+        sources.map((s) => s.path),
+        targetName,
+      );
       onPlanned(targetName, jobs);
     } catch (e) {
       setError(toAppError(e));
@@ -123,8 +106,6 @@ export function DropPage({
     }
   }
 
-  const readyCount = sources.filter((s) => s.status === "ready").length;
-
   return (
     <div className="drop-page">
       {error && (
@@ -132,8 +113,6 @@ export function DropPage({
           error={error}
           onDismiss={() => setError(null)}
           onAction={(kind) => {
-            // "Retry" here means re-running whatever the user was last doing, which on
-            // this page is always building the plan.
             if (kind === "retry") {
               setError(null);
               void handleBuildPlan();
@@ -148,106 +127,124 @@ export function DropPage({
         <label className="field-label" htmlFor="target-select">
           Destination
         </label>
-        <select id="target-select" value={targetName} onChange={(e) => setTargetName(e.target.value)}>
+        <select
+          id="target-select"
+          value={targetName}
+          onChange={(e) => {
+            setTargetName(e.target.value);
+            // Remembered for next time. Best-effort: failing to persist a preference
+            // should never interrupt what the user is actually doing.
+            void setLastUsedTarget(e.target.value).catch(() => {});
+          }}
+        >
           {targets?.map((t) => (
             <option key={t.name} value={t.name}>
               {t.name} ({t.fsType ?? "unknown fs"}, {t.freeBytes !== null ? formatBytes(t.freeBytes) : "?"} free)
             </option>
           ))}
         </select>
-        {targets && targets.length === 0 && <p className="muted">No destinations found — mount a card or drive under /Volumes.</p>}
+        {targets && targets.length === 0 && (
+          <p className="muted">No destinations found — mount a card or drive under /Volumes, then reload.</p>
+        )}
       </section>
 
-      <section
-        className={dragActive ? "dropzone dropzone-active" : "dropzone"}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragActive(true);
-        }}
-        onDragLeave={() => setDragActive(false)}
-        onDrop={onDrop}
-      >
-        <p>Drag and drop ROM files here</p>
-        <p className="muted">or</p>
-        <label className="file-picker-button">
-          Choose files…
-          <input
-            type="file"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => {
-              for (const file of Array.from(e.target.files ?? [])) handleUpload(file);
-              e.target.value = "";
-            }}
-          />
-        </label>
-      </section>
+      <section className="picker">
+        <button type="button" className="picker-cta" onClick={handleSelectFiles} disabled={selecting}>
+          {selecting ? "Waiting for Finder…" : "Select files…"}
+        </button>
+        <p className="muted picker-note">
+          Files are read where they are — nothing is copied until it's converted onto {targetName || "the destination"}.
+        </p>
 
-      <section>
-        <label className="field-label" htmlFor="path-input">
-          Add by path (for large files already on disk — avoids copying them)
-        </label>
-        <div className="inline-form">
-          <input
-            id="path-input"
-            type="text"
-            placeholder="/path/to/game.iso"
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAddPath()}
-          />
-          <button onClick={handleAddPath}>Add</button>
-          <button onClick={handleBrowseNative} disabled={browsing}>
-            {browsing ? "Waiting for Finder…" : "Browse…"}
+        {!showPathInput && (
+          <button type="button" className="link-button" onClick={() => setShowPathInput(true)}>
+            or type a path
           </button>
-        </div>
+        )}
+
+        {showPathInput && (
+          <div className="inline-form path-form">
+            <label className="visually-hidden" htmlFor="path-input">
+              File path
+            </label>
+            <input
+              id="path-input"
+              type="text"
+              placeholder="/path/to/game.iso"
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddPath()}
+              autoFocus
+            />
+            <button type="button" onClick={handleAddPath} disabled={!pathInput.trim()}>
+              Add
+            </button>
+          </div>
+        )}
       </section>
 
       <section>
-        <h2>Queued ({sources.length})</h2>
-        {sources.length === 0 && <p className="muted">Nothing queued yet.</p>}
+        <h2>Selected ({sources.length})</h2>
+        {sources.length === 0 && <p className="muted">Nothing selected yet — use Select files… above to pick some ROMs.</p>}
         {sources.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sources.map((s) => (
-                <tr key={s.key}>
-                  <td>{s.name}</td>
-                  <td>{formatBytes(s.size)}</td>
-                  <td>{s.status === "uploading" ? `Uploading… ${Math.round((s.progress ?? 0) * 100)}%` : "Ready"}</td>
-                  <td>
-                    <button onClick={() => removeSource(s.key)}>Remove</button>
-                  </td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Size</th>
+                  <th>Location</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {sources.map((s) => (
+                  <tr key={s.path}>
+                    <td>{s.name}</td>
+                    <td>{formatBytes(s.size)}</td>
+                    <td className="mono muted">
+                      {/* Reassurance that the file is being read in place, not the point of
+                          the row — truncated, with the full path on hover. */}
+                      <span className="source-location" title={s.path}>
+                        {s.path.slice(0, s.path.length - s.name.length).replace(/\/$/, "")}
+                      </span>
+                    </td>
+                    <td>
+                      <button type="button" onClick={() => removeSource(s.path)}>
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
       <ActionBar
         status={
           planning ? (
-            <span className="inline-status">
+            <span className="inline-status" aria-live="polite">
               <Spinner />
               {slowPlanning
                 ? "Still working — inspecting archived or multi-disc files takes longer."
                 : "Detecting systems and checking destinations…"}
             </span>
           ) : (
-            <span className="muted">{readyCount > 0 ? `${readyCount} file${readyCount === 1 ? "" : "s"} ready.` : "Add files to get started."}</span>
+            <span className="muted" aria-live="polite">
+              {sources.length > 0 ? `${sources.length} file${sources.length === 1 ? "" : "s"} selected.` : "Select files to get started."}
+            </span>
           )
         }
       >
-        <button type="button" className="button-primary" onClick={handleBuildPlan} disabled={readyCount === 0 || !targetName || planning}>
-          {planning ? "Building plan…" : `Build Plan (${readyCount})`}
+        <button
+          type="button"
+          className="button-primary"
+          onClick={handleBuildPlan}
+          disabled={sources.length === 0 || !targetName || planning}
+        >
+          {planning ? "Building plan…" : `Build Plan (${sources.length})`}
         </button>
       </ActionBar>
     </div>

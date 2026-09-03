@@ -59,6 +59,21 @@ export function parsePlanOverrides(raw: unknown): { overrides: Record<string, Pl
   return { overrides };
 }
 
+/**
+ * How much a warning should worry the user.
+ *
+ * "blocker" means the job cannot succeed as planned; "warning" means it probably will
+ * but something is worth checking; "info" is a note about a decision already made on
+ * their behalf. Everything used to render identically as "⚠ text", which made "low
+ * confidence match" look as serious as "not enough free space".
+ */
+export type WarningLevel = "info" | "warning" | "blocker";
+
+export interface PlanWarning {
+  level: WarningLevel;
+  text: string;
+}
+
 export interface PlannedJob {
   sourcePath: string;
   sourceName: string;
@@ -70,7 +85,7 @@ export interface PlannedJob {
   destinationFolder: string | null;
   destinationFilename: string | null;
   estimatedOutputBytes: number | null;
-  warnings: string[];
+  warnings: PlanWarning[];
   /** True when the user explicitly chose to overwrite an existing destination file. */
   replace: boolean;
   /**
@@ -80,6 +95,13 @@ export interface PlannedJob {
    * names a file that will be deleted.
    */
   replacesPath: string | null;
+}
+
+const LEVEL_ORDER: Record<WarningLevel, number> = { blocker: 0, warning: 1, info: 2 };
+
+/** Blockers first — the reason a row can't run should be the first thing read. */
+function sortByLevel(warnings: PlanWarning[]): PlanWarning[] {
+  return [...warnings].sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]);
 }
 
 export function buildPlan(
@@ -100,14 +122,15 @@ function buildOne(
   options: DetectOptions,
   override?: PlanOverride,
 ): PlannedJob {
-  const warnings: string[] = [];
+  const warnings: PlanWarning[] = [];
+  const warn = (level: WarningLevel, text: string) => warnings.push({ level, text });
   const sourceName = path.basename(sourcePath);
 
   let sourceBytes = 0;
   try {
     sourceBytes = statSync(sourcePath).size;
   } catch {
-    warnings.push("Could not read source file size.");
+    warn("warning", "Could not read source file size.");
   }
 
   // Detection reads the file (and, for archives, shells out to 7zz), so anything from a
@@ -125,7 +148,9 @@ function buildOne(
       warnings: [`Could not inspect this file: ${err instanceof Error ? err.message : String(err)}`],
     };
   }
-  if (detection.warnings) warnings.push(...detection.warnings);
+  // A detector warning means something about the file itself couldn't be resolved —
+  // a missing track file, an uninspectable archive — so the job is unlikely to run.
+  if (detection.warnings) for (const text of detection.warnings) warn("blocker", text);
 
   // For an archive, statSync above measured the *compressed* .7z/.zip size — size estimates,
   // free-space checks, and the sector-alignment check below all need the real decompressed
@@ -146,15 +171,15 @@ function buildOne(
   // letting the job fail with an opaque chdman error after the user clicks Process.
   if (!override?.action && selectedSystemId === "ps2" && action === "chd-dvd" && sourceBytes > 0 && sourceBytes % 2352 === 0 && sourceBytes % 2048 !== 0) {
     action = "chd-cd";
-    warnings.push("Detected as a CD-mode PS2 dump (size is a multiple of 2352 bytes, not 2048) — using chd-cd instead of the usual chd-dvd.");
+    warn("info", "Detected as a CD-mode PS2 dump (size is a multiple of 2352 bytes, not 2048) — using chd-cd instead of the usual chd-dvd.");
   }
 
   // Only warn about detection confidence when the user hasn't already made the call themselves.
   if (!override?.systemId) {
     if (!selectedSystemId) {
-      warnings.push("Could not identify a system for this file — select one manually.");
+      warn("blocker", "Could not identify a system for this file — select one manually.");
     } else if (topCandidate && topCandidate.confidence < 0.6) {
-      warnings.push(`Low-confidence match (${Math.round(topCandidate.confidence * 100)}%) — double-check before processing.`);
+      warn("warning", `Low-confidence match (${Math.round(topCandidate.confidence * 100)}%) — double-check before processing.`);
     }
   }
 
@@ -165,7 +190,7 @@ function buildOne(
   if (selectedSystemId && action) {
     const folderName = folderMap[selectedSystemId];
     if (!folderName) {
-      warnings.push(`No destination folder mapped for ${system?.name ?? selectedSystemId} on ${target.name} — assign one in Settings.`);
+      warn("blocker", `No destination folder mapped for ${system?.name ?? selectedSystemId} on ${target.name} — assign one in Settings.`);
     } else {
       destinationFolder = path.join(target.romRoot, folderName);
     }
@@ -176,19 +201,20 @@ function buildOne(
     if (destinationFolder) {
       const destPath = path.join(destinationFolder, sanitizeExfatName(destinationFilename));
       if (existsSync(destPath) && !override?.replace) {
-        warnings.push(`A file named "${destinationFilename}" already exists at the destination.`);
+        warn("blocker", `A file named "${destinationFilename}" already exists at the destination.`);
       }
     }
 
     if (target.freeBytes !== null && estimatedOutputBytes > target.freeBytes) {
-      warnings.push(
+      warn(
+        "blocker",
         `Estimated output (~${Math.round(estimatedOutputBytes / 1024 / 1024)} MB) exceeds free space on ${target.name} (${Math.round(target.freeBytes / 1024 / 1024)} MB).`,
       );
     }
   }
 
   if (!target.writable) {
-    warnings.push(`${target.name} is not writable.`);
+    warn("blocker", `${target.name} is not writable.`);
   }
 
   return {
@@ -202,7 +228,7 @@ function buildOne(
     destinationFolder,
     destinationFilename,
     estimatedOutputBytes,
-    warnings,
+    warnings: sortByLevel(warnings),
     replace: override?.replace ?? false,
     replacesPath: null,
   };

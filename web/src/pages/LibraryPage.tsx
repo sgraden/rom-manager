@@ -12,21 +12,10 @@ import {
 } from "../api";
 import { Spinner } from "../Spinner";
 import { ErrorPanel } from "../ErrorPanel";
+import { ConfirmDialog } from "../ConfirmDialog";
+import { formatBytes, formatDate } from "../format";
 import { toAppError, type AppError } from "../AppError";
 import { ActionBar } from "../ActionBar";
-
-function formatBytes(bytes: number | null): string {
-  if (bytes === null) return "—";
-  const gb = bytes / 1024 ** 3;
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
-  const mb = bytes / 1024 ** 2;
-  if (mb >= 1) return `${mb.toFixed(1)} MB`;
-  return `${(bytes / 1024).toFixed(0)} KB`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
-}
 
 function SystemGroup({
   folder,
@@ -97,6 +86,7 @@ export function LibraryPage({ onDropFiles }: { onDropFiles: () => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<AppError | null>(null);
   const [search, setSearch] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<LibraryEntry | null>(null);
 
   useEffect(() => {
     Promise.all([fetchTargets(), fetchSystems()])
@@ -128,13 +118,8 @@ export function LibraryPage({ onDropFiles }: { onDropFiles: () => void }) {
 
   const systemNameById = useMemo(() => new Map((systems ?? []).map((s) => [s.id, s.name] as const)), [systems]);
 
-  async function handleDelete(entry: LibraryEntry) {
-    // Naming the file matters here — this permanently removes it from the card.
-    const confirmed = window.confirm(
-      `Delete "${entry.filename}" from ${targetName}?\n\nThis permanently removes ${formatBytes(entry.sizeBytes)} from the card and can't be undone.`,
-    );
-    if (!confirmed) return;
-
+  async function confirmDelete(entry: LibraryEntry) {
+    setPendingDelete(null);
     try {
       await deleteLibraryEntry(targetName, entry.folder, entry.filename);
       await load(targetName);
@@ -243,11 +228,31 @@ export function LibraryPage({ onDropFiles }: { onDropFiles: () => void }) {
               systemName={group.systemId ? (systemNameById.get(group.systemId) ?? group.systemId) : null}
               entries={group.entries}
               totalBytes={group.totalBytes}
-              onDelete={handleDelete}
+              onDelete={setPendingDelete}
               onReveal={handleReveal}
             />
           ))}
         </>
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this file from the card?"
+          confirmLabel="Delete"
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => void confirmDelete(pendingDelete)}
+          body={
+            <>
+              <p>
+                <strong className="mono">{pendingDelete.filename}</strong>
+              </p>
+              <p className="muted">
+                {formatBytes(pendingDelete.sizeBytes)} in {pendingDelete.folder} on {targetName}. This removes it from the card
+                permanently — it doesn't go to the Trash, and it can't be undone.
+              </p>
+            </>
+          }
+        />
       )}
 
       <ActionBar status={null}>

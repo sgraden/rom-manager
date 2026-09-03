@@ -10,7 +10,24 @@ export const targetsRouter = Router();
 
 targetsRouter.get("/", (_req, res) => {
   const config = loadConfig();
-  res.json({ targets: listTargets(config.additionalTargetPaths) });
+  const targets = listTargets(config.additionalTargetPaths);
+  // lastUsed is only a hint — the client falls back to the first target when the
+  // remembered one isn't mounted right now.
+  res.json({ targets, lastUsed: config.lastTargetName });
+});
+
+/** Remembers which destination the user is working with, so it's preselected next time. */
+targetsRouter.put("/last-used", (req, res) => {
+  const { name } = req.body ?? {};
+  if (typeof name !== "string" || name.length === 0) {
+    res.status(400).json({ error: "name is required." });
+    return;
+  }
+
+  const config = loadConfig();
+  config.lastTargetName = name;
+  saveConfig(config);
+  res.json({ ok: true, lastUsed: name });
 });
 
 function findTarget(name: string, additionalTargetPaths: string[]) {

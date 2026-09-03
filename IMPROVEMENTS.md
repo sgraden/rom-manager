@@ -14,11 +14,10 @@ would have caught it, then add a `> **Status: done.**` line under its heading sa
 Items are ordered by impact within each section. Nothing here requires a rewrite — they are all
 local changes.
 
-**Progress.** Sections 1–4 are complete: every correctness, efficiency and robustness item, plus
-the Library page and duplicate matching end to end (verified in a real browser against a scratch
-card). Of §5, the responsive pass (§5.2) and the evidence badge are done. **Still to do: §5.1
-(the structured error/remedy pass — the largest remaining item), §5.3 (progress legibility), and
-the rest of §5.4.** Sections 1–3 — every correctness, efficiency and
+**Progress.** **Everything in this document is done.** Sections 1–4 (correctness, efficiency,
+robustness, and the Library page with duplicate matching), all of §5 (actionable errors,
+responsive layout, progress legibility, and the smaller items), and §5a — the ingest rework that
+removed copying files into `staging/` before converting them. Sections 1–3 — every correctness, efficiency and
 robustness item listed below has landed, each with a test. Remaining: **§4** (Library page and
 duplicate matching) and **§5** (design work).
 
@@ -629,8 +628,11 @@ page body scrolls sideways instead.
   or a JS middle-truncate) — the filename at the end is the informative part, not `/Volumes/…`.
 
 ### 5.3 Progress is honest but not legible
-> **Partly done.** A `hashing` phase is now emitted (§2.4), and the Queue reports what a replace
-> displaced. The aggregate queue bar, elapsed time and ETA are **still to do.**
+> **Status: done.** A `hashing` phase is emitted (§2.4), the Queue reports what a replace
+> displaced, and there's now an aggregate bar across the whole batch — "N of M done · X written ·
+> ~T remaining" — with elapsed time on each running row. One shared timer drives every row, and
+> it only ticks while something is running. The ETA is withheld until 10% progress, where the
+> extrapolation starts to mean anything.
 
 - The Queue progress bar is a bare `scaleX` track with the percentage in small muted text. Show
   the phase (`converting`, `verifying`, `hashing`) as a first-class label, and add an elapsed
@@ -644,27 +646,51 @@ page body scrolls sideways instead.
 
 ### 5.4 Smaller items, roughly in value order
 
-- **Destructive actions need confirmation.** Library delete names the file and its size in the
-  confirmation, but still uses `window.confirm` — replace it with an in-app dialog. Review's
-  "Replace" is still unconfirmed at the point of clicking Process.
-- **`aria-live="polite"` on error and status regions**, so a screen reader announces a failure
-  that appears without a navigation. Currently nothing is announced.
-- **Drag-and-drop flicker.** `DropPage`'s `onDragLeave` fires when the pointer crosses a child
-  element, so the highlight strobes. Use a depth counter incremented on `dragenter` and
-  decremented on `dragleave`.
-- **Empty states should point somewhere.** "Nothing queued yet." is a dead end; "Drop files
-  above, or add one by path" is not. Each of Drop, Review, Queue, and the new Library page needs
-  one.
-- **Warnings need severity.** Every plan warning renders identically as `⚠ text`, whether it is
-  "low-confidence match" (informational) or "not enough free space" (blocking). Split into
-  `info` / `warning` / `blocker`, colour accordingly, and sort blockers first.
-- **Keyboard support on the file picker.** `.file-picker-button` is a `<label>` wrapping a
-  hidden `<input type="file">` — it is not reachable by Tab and has no focus ring.
+- ~~**Destructive actions need confirmation.**~~ **Done** — `ConfirmDialog` replaces
+  `window.confirm`: it names the file, its size and its folder, says the file won't go to the
+  Trash, focuses Cancel (so a stray Return can't delete anything) and closes on Escape.
+- ~~**`aria-live="polite"` on error and status regions**~~ **Done** — status lines on Drop,
+  Review and Queue, plus the aggregate progress summary, announce themselves; `ErrorPanel`
+  carries `role="alert"`.
+- ~~**Drag-and-drop flicker.**~~ **Moot** — drag-and-drop is gone entirely (see §6a); it was the
+  mechanism that forced a full copy of every file into `staging/`.
+- ~~**Empty states should point somewhere.**~~ **Done** — Drop, Review, Queue and Library each
+  name the next action rather than just reporting emptiness.
+- ~~**Warnings need severity.**~~ **Done** — `PlanWarning` now carries `info` / `warning` /
+  `blocker`, sorted blockers-first server-side and rendered with distinct icons and colours; a
+  blocked row is tinted. Covered by two `plan.test.ts` cases.
+- ~~**Keyboard support on the file picker.**~~ **Moot** — the hidden-input-in-a-label is gone;
+  the picker is a real `<button>` (see §6a).
 - ~~**Show the detection evidence on demand, not always.**~~ **Done** — now a confidence badge
   with the evidence as its tooltip, tinted when the match is low-confidence. This is what bought
   back the width the Status column needed.
-- **Persist the selected target.** `DropPage` defaults to `targets[0]` on every load; someone
-  with two volumes mounted re-picks every time. Store the last used target in config.
+- ~~**Persist the selected target.**~~ **Done** — stored as `lastTargetName` in config and
+  preselected on load, falling back to the first target when the remembered one isn't mounted.
+
+---
+
+## 5a. Ingest: files are no longer copied before conversion
+
+> **Status: done.**
+
+**The problem.** Two of the three ways files entered the app — the drag-and-drop zone and the
+`<input type="file">` picker — worked by *uploading* the file into `staging/`, converting from
+that copy, then deleting it. A browser page cannot learn a real filesystem path from either
+mechanism; it only receives the bytes. So adding a 40 GB folder of disc images meant writing
+40 GB to the internal drive first, waiting for it, and deleting it afterwards — for files that
+were already sitting on disk a few directories away.
+
+**The change.** Both upload paths are removed, along with `POST /api/ingest/upload`,
+`uploadFile()` and `stagedUploadPath()`. The macOS open panel (`POST /api/browse/native`, which
+already existed as a secondary "Browse…" button) returns real paths, so it is now the single
+primary CTA: **Select files…**, sized and coloured as the page's only call to action, with a
+one-line explanation that files are read where they are. Typing a path remains as a link-styled
+escape hatch for pasted or scripted paths.
+
+`staging/` is kept but nothing writes to it any more; the startup sweep now exists to clear out
+what earlier versions left behind, and the queue's staged-source cleanup still recognises a
+source living there. Verified in a browser: after selecting and processing files, `staging/`
+contains nothing but its `.gitkeep`.
 
 ---
 

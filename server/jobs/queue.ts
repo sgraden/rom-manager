@@ -730,7 +730,7 @@ export class JobQueue extends EventEmitter {
     try {
       unlinkSync(job.sourcePath);
       if (isStagedCopy) {
-        // Each upload gets its own UUID subdirectory (see stagedUploadPath) — remove it
+        // Staged uploads each had their own UUID subdirectory — remove it
         // too now that it's empty. rmdirSync only succeeds on an empty directory, so
         // this is a safe no-op for anything else (including pre-existing flat-layout
         // staged files, whose parent is STAGING_DIR itself and is never removed here).

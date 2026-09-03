@@ -24,6 +24,8 @@ export interface AppConfig {
   toolPathOverrides: ToolPathOverrides;
   targetFolderMaps: Record<string, { romRoot: string; folderMap: Record<string, string> }>;
   systemActionOverrides: Record<string, string>;
+  /** The destination chosen last, so someone with several volumes mounted doesn't re-pick each visit. */
+  lastTargetName: string | null;
 }
 
 /**
@@ -43,6 +45,7 @@ const DEFAULTS: AppConfig = {
   toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
   targetFolderMaps: {},
   systemActionOverrides: {},
+  lastTargetName: null,
 };
 
 /**

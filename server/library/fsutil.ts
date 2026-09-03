@@ -1,5 +1,4 @@
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import type { ConvertAction } from "./systems.js";
 
 const ILLEGAL_EXFAT_CHARS = /["*/:<>?\\|]/g;
@@ -31,19 +30,6 @@ const ACTION_SIZE_MULTIPLIER: Record<ConvertAction, number> = {
 /** A rough, clearly-labeled-as-estimated size for planning purposes — actual conversion (phase 4) reports the real size. */
 export function estimateOutputBytes(sourceBytes: number, action: ConvertAction): number {
   return Math.round(sourceBytes * ACTION_SIZE_MULTIPLIER[action]);
-}
-
-/**
- * Where a browser upload should be staged. Each upload gets its own UUID
- * subdirectory rather than a UUID-prefixed filename, so the file's basename
- * always matches the original name exactly — no internal disambiguating id
- * ever leaks into planning (which derives a job's name from the basename)
- * or, from there, into the destination filename.
- */
-export function stagedUploadPath(stagingDir: string, originalName: string): { filePath: string; uploadDir: string; safeName: string } {
-  const safeName = path.basename(originalName);
-  const uploadDir = path.join(stagingDir, randomUUID());
-  return { filePath: path.join(uploadDir, safeName), uploadDir, safeName };
 }
 
 /** True if `candidate` is `dir` itself or something inside it. */

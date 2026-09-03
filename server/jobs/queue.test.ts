@@ -1059,7 +1059,7 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     const destDir = makeTempDir();
     mkdirSync(path.join(destDir, "nes"));
 
-    // Mirrors the real upload layout from stagedUploadPath: staging/<uuid>/<original name>.
+    // Mirrors the layout the removed upload path used: staging/<uuid>/<original name>.
     const uploadDir = path.join(STAGING_DIR, `queue-test-upload-${Date.now()}`);
     mkdirSync(uploadDir, { recursive: true });
     const stagedPath = path.join(uploadDir, "Dark Cloud 2 (USA) (v2.00).zip");

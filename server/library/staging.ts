@@ -4,10 +4,11 @@ import path from "node:path";
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Removes staged-upload directories left behind by uploads that never finished.
- * Each upload gets its own UUID subdirectory (see stagedUploadPath), and a
- * successful job deletes its own; an upload interrupted by a crash or a hard
- * process kill can't, so they'd otherwise accumulate forever.
+ * Removes staged-upload directories left behind by the browser-upload ingest path,
+ * which no longer exists — files are now read where they already live rather than
+ * being copied in first. Nothing creates these any more, so this exists to clear out
+ * what earlier versions left on disk (an upload interrupted by a crash could never
+ * clean up after itself).
  *
  * Age-gated rather than unconditional: an upload could be in flight right now,
  * and this runs at startup while nothing else has claimed anything yet, so only

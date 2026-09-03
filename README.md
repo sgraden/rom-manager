@@ -3,7 +3,7 @@
 > **Built with AI.** This project was written with the assistance of AI coding tools. Every
 > feature was reviewed and tested against real conversions, but treat the code accordingly.
 
-A local web app for curating a ROM library: drop a file in, it detects the console, converts
+A local web app for curating a ROM library: point it at a file, it detects the console, converts
 disc images to space-efficient CHD/RVZ, and files the result into the right per-system folder
 on a destination (an SD card, an external drive, wherever). Built for personal use on macOS.
 
@@ -11,13 +11,16 @@ Full design/architecture is in [PLAN.md](PLAN.md). This README covers install an
 Known bugs, performance work, and planned features are tracked in
 [IMPROVEMENTS.md](IMPROVEMENTS.md).
 
-**Status:** Phase 4 of 5 — the app is fully functional end to end. Drop or path-in files, review
-the detected system/action/destination, hit **Process**, and it actually converts (via `chdman`/
-`7zz`/DolphinTool) and writes into the right folder on your destination, atomically, with live
-progress in the Queue tab. Only Phase 5 (hashing + optional DAT-based renaming) remains, and it's
-inert-by-default even once built — v1 is otherwise complete. A visual/layout pass (spacing,
-button sizing, CTA visibility) is planned as the next piece of work — current styling is
-functional but rough in a few spots (see the Review table on narrow windows).
+**Status:** fully functional end to end. Select files, review the detected
+system/action/destination, hit **Process**, and it converts (via `chdman`/`7zz`/DolphinTool) and
+writes into the right folder on your destination, atomically, with live progress in the Queue
+tab. Files are read where they already live — nothing is ever copied into the app first.
+
+A **Library** tab shows what's already on the card, and adding a game that's already there offers
+an explicit Replace or Skip before anything is written. Sources are hashed and recorded in
+`data/library.jsonl`, matched against any DAT files in `config/dats/` (informational only — the
+app never renames). Errors state what went wrong and what to do about it, and failed jobs can be
+retried in place.
 
 ---
 
@@ -108,9 +111,9 @@ On first run the app creates a few files and folders that are **not** part of th
 | Path | Purpose |
 |---|---|
 | `config/config.json` | Your settings — destination folder mappings, tool path overrides, per-system action overrides. Generated from `config/config.example.json` on first run. |
-| `config/dats/` | Drop No-Intro/Redump `.dat` files here to enable exact-name matching later (see [Roadmap](#roadmap)). Empty is fine — the app works fully without any. |
-| `data/library.json` | Reserved for Phase 5 (library hashing) — not written yet. |
-| `staging/` | Temporary holding area for uploads while they're being processed — deleted automatically once a job using them succeeds (see below). |
+| `config/dats/` | Drop No-Intro/Redump `.dat` files here to enable canonical-name matching (shown in the Queue and Library; never used to rename). Loaded at startup, so a new DAT needs a restart. Empty is fine — the app works fully without any. |
+| `data/library.jsonl` | Append-only record of everything processed: hashes, action, destination, sizes, DAT match. One JSON object per line. An older `library.json` is migrated to it automatically on first write. |
+| `staging/` | Legacy holding area from when files were uploaded into the app rather than read in place. Nothing writes here any more; leftovers are swept at startup. |
 
 None of this needs to be backed up to get the app working on a new machine — it all regenerates.
 If you *do* want to carry your settings or library history to a new machine, copy those files
@@ -148,12 +151,11 @@ name is editable before creating.
 
 ## Using the app
 
-1. **Drop tab** — pick a destination, then add files either by dragging them in (streamed
-   straight to `staging/`, never buffered in memory — safe for huge disc images), or via
-   "Add by path" / the built-in folder browser for files already on disk (no copy). A dragged-in
-   file's original name is always preserved exactly — each upload gets its own internal id
-   directory rather than an id-prefixed filename, so that id never leaks into the destination
-   filename. Click **Build Plan** — nothing is written yet.
+1. **Drop tab** — pick a destination, then click **Select files…** to choose ROMs in the normal
+   macOS open panel. Files are read where they already live: nothing is ever copied into the app
+   first, so adding a 40 GB folder of disc images costs no disk space and no waiting. (A "or type
+   a path" escape hatch takes a path directly, for scripted or pasted paths.) The destination you
+   pick is remembered for next time. Click **Build Plan** — nothing is written yet.
 2. **Review tab** — each file shows its detected system (with the evidence behind the guess), the
    action that will run on it, its destination path, and any warnings (name collision, low
    detection confidence, no folder mapped, not enough free space). Override the system or action
@@ -182,11 +184,7 @@ a `(Disc N)`/`(Disk N)`/`(CD N)` token — gets a `.m3u` playlist written alongs
 disc in the set is done.
 
 **Source cleanup after a successful job:**
-- A **dragged-in upload** (staged under `staging/`) is always deleted once its job succeeds — it's
-  the app's own internal copy, so there's nothing to preserve. A failed job leaves it in place
-  (nothing was written at the destination, so there's no reason to lose your only copy).
-- A **path-based source** ("Add by path" / the folder browser) is your own file living elsewhere
-  on disk, so it's left alone by default. Set `"deleteSourceAfterSuccess": true` in
+- Every source is **your own file**, living where you selected it, so it's left alone by default. Set `"deleteSourceAfterSuccess": true` in
   `config/config.json` if you want those removed too after a successful conversion — useful if
   your workflow is "convert, then free up space on the Mac." Off by default; only applies on
   success, never on a failed or cancelled job.
@@ -244,9 +242,10 @@ so this is cheap even against multi-gigabyte disc images.
 
 ## Roadmap
 
-See [PLAN.md](PLAN.md) for the full build plan. Remaining:
-
-5. Library hashing + optional DAT-based renaming (inert until you add DAT files)
+See [PLAN.md](PLAN.md) for the original build plan, and [IMPROVEMENTS.md](IMPROVEMENTS.md) for
+what has been fixed since and what's tracked next. Library hashing and DAT matching are built and
+running; the one deliberately unbuilt piece is **DAT-based renaming** — the hashes and canonical
+names are recorded, but nothing is ever renamed.
 
 ---
 
@@ -263,6 +262,6 @@ Project layout:
 server/    Express API — tool discovery, destination/folder mapping, system detection, planning, conversion + job queue
 web/       Vite + React UI
 config/    User settings + optional DAT files (gitignored except the example/.gitkeep)
-data/      Reserved for the Phase 5 library log (gitignored, not written yet)
-staging/   Upload holding area (gitignored)
+data/      Append-only library log, library.jsonl (gitignored)
+staging/   Legacy upload holding area, swept at startup (gitignored)
 ```

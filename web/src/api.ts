@@ -45,6 +45,13 @@ export interface PlanOverride {
   replace?: boolean;
 }
 
+export type WarningLevel = "info" | "warning" | "blocker";
+
+export interface PlanWarning {
+  level: WarningLevel;
+  text: string;
+}
+
 export interface PlannedJob {
   sourcePath: string;
   sourceName: string;
@@ -56,7 +63,7 @@ export interface PlannedJob {
   destinationFolder: string | null;
   destinationFilename: string | null;
   estimatedOutputBytes: number | null;
-  warnings: string[];
+  warnings: PlanWarning[];
   replace: boolean;
 }
 
@@ -104,8 +111,14 @@ export function fetchTools(refresh = false): Promise<{ tools: ToolInfo[] }> {
   return getJson(refresh ? "/api/tools?refresh=1" : "/api/tools");
 }
 
-export function fetchTargets(): Promise<{ targets: TargetInfo[] }> {
+/** `lastUsed` is the destination chosen last time, or null — a hint, not a guarantee it's mounted. */
+export function fetchTargets(): Promise<{ targets: TargetInfo[]; lastUsed: string | null }> {
   return getJson("/api/targets");
+}
+
+/** Remembers the destination being worked with, so it's preselected next time. */
+export function setLastUsedTarget(name: string): Promise<{ ok: true; lastUsed: string }> {
+  return putJson("/api/targets/last-used", { name });
 }
 
 export function fetchSystems(): Promise<{ systems: SystemDef[] }> {
@@ -144,26 +157,6 @@ export interface IngestedFile {
 
 export function ingestPath(path: string): Promise<IngestedFile> {
   return postJson("/api/ingest/path", { path });
-}
-
-export function uploadFile(file: File, onProgress?: (bytesSent: number, totalBytes: number) => void): Promise<IngestedFile> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/ingest/upload?filename=${encodeURIComponent(file.name)}`);
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress?.(e.loaded, e.total);
-    };
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText));
-      } else {
-        reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Upload failed (network error)"));
-    xhr.send(file);
-  });
 }
 
 export function planJobs(sourcePaths: string[], targetName: string, overrides?: Record<string, PlanOverride>): Promise<{ jobs: PlannedJob[] }> {

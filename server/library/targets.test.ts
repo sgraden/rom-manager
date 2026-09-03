@@ -26,6 +26,7 @@ function fakeConfig(overrides: AppConfig["targetFolderMaps"] = {}): AppConfig {
     toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
     targetFolderMaps: overrides,
     systemActionOverrides: {},
+    lastTargetName: null,
   };
 }
 

@@ -1,9 +1,11 @@
 :root {
   color-scheme: light dark;
+  --bg: canvas;
   --border: #3a3a3a33;
   --bg-subtle: #80808014;
   --error: #d64545;
   --warn: #c98a1a;
+  --success: #3fae66;
 }
 
 * {
@@ -12,6 +14,7 @@
 
 body {
   margin: 0;
+  background: var(--bg);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 14px;
 }
@@ -24,7 +27,9 @@ body {
 
 .app-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 12px;
   gap: 24px;
   padding: 20px 0;
   border-bottom: 1px solid var(--border);
@@ -35,27 +40,109 @@ body {
   margin: 0;
 }
 
-.tabs {
+.stepper {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
-.tab {
+.step {
+  display: flex;
+  align-items: center;
+}
+
+.step-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border: none;
   background: transparent;
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
+  color: inherit;
 }
 
-.tab:hover {
+.step-button:hover {
   background: var(--bg-subtle);
 }
 
-.tab.active {
+.step-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.step-upcoming .step-marker {
+  opacity: 0.6;
+}
+
+.step-upcoming .step-label {
+  opacity: 0.6;
+}
+
+.step-current .step-marker {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #241a00;
+}
+
+.step-current .step-label {
+  font-weight: 700;
+}
+
+.step-complete .step-marker {
+  background: var(--success);
+  border-color: var(--success);
+  color: #04170a;
+}
+
+.step-connector {
+  width: 24px;
+  height: 1.5px;
+  background: var(--border);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+.step-connector-filled {
+  background: var(--success);
+}
+
+.settings-link {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  opacity: 0.75;
+  color: inherit;
+}
+
+.settings-link:hover {
+  background: var(--bg-subtle);
+  opacity: 1;
+}
+
+.settings-link.active {
   background: var(--bg-subtle);
   font-weight: 600;
+  opacity: 1;
 }
 
 .app-main {
@@ -209,44 +296,6 @@ input[type="text"] {
   flex: 1;
 }
 
-.file-browser {
-  margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  max-height: 280px;
-  overflow-y: auto;
-}
-
-.file-browser-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  background: var(--bg-subtle);
-}
-
-.file-browser ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.file-browser-row {
-  padding: 6px 10px;
-  cursor: pointer;
-}
-
-.file-browser-row:hover {
-  background: var(--bg-subtle);
-}
-
-.build-plan-row {
-  margin-top: 12px;
-}
-
 .preview-banner {
   background: var(--bg-subtle);
   border: 1px solid var(--border);
@@ -288,17 +337,6 @@ input[type="text"] {
 
 .action-help li {
   margin-bottom: 4px;
-}
-
-.review-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.review-toolbar .preview-banner {
-  flex: 1;
-  margin-bottom: 0;
 }
 
 .row-error {
@@ -359,4 +397,43 @@ input[type="text"] {
   transform-origin: left;
   transform: scaleX(0);
   transition: transform 0.2s ease;
+}
+
+.action-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+  padding: 14px 4px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.action-bar-status {
+  flex: 1;
+  min-width: 200px;
+  font-size: 13px;
+}
+
+.action-bar-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.action-bar .button-primary {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #241a00;
+  font-weight: 600;
+}
+
+.action-bar .button-primary:disabled {
+  background: var(--bg-subtle);
+  border-color: var(--border);
+  color: inherit;
 }

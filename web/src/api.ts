@@ -57,13 +57,6 @@ export interface PlannedJob {
   warnings: string[];
 }
 
-export interface BrowseEntry {
-  name: string;
-  path: string;
-  isDirectory: boolean;
-  size: number;
-}
-
 export interface FolderMapResult {
   folderMap: Record<string, string>;
   unmatchedFolders: string[];
@@ -128,9 +121,15 @@ export function createFolder(targetName: string, systemId: string, folderName?: 
   return postJson(`/api/targets/${encodeURIComponent(targetName)}/folders`, { systemId, folderName });
 }
 
-export function browseDir(dir?: string): Promise<{ dir: string; parent: string | null; entries: BrowseEntry[] }> {
-  const url = dir ? `/api/browse?dir=${encodeURIComponent(dir)}` : "/api/browse";
-  return getJson(url);
+export interface NativeBrowseFile {
+  path: string;
+  name: string;
+  size: number;
+}
+
+/** Opens the real macOS file-open panel and returns whatever the user picked. */
+export function browseNative(): Promise<{ files: NativeBrowseFile[] }> {
+  return postJson("/api/browse/native", {});
 }
 
 export interface IngestedFile {
@@ -188,6 +187,7 @@ export interface JobInfo {
   startedAt: string | null;
   finishedAt: string | null;
   m3uWritten: string | null;
+  datMatch: string | null;
 }
 
 export interface SubmitJobsResult {

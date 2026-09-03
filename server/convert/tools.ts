@@ -2,6 +2,25 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { ToolPathOverrides } from "../library/config.js";
 
+/**
+ * The official macOS Dolphin.app release (the `brew install --cask dolphin` build) doesn't
+ * bundle a DolphinTool CLI binary — only the GUI app. `@emmercm/dolphin-tool-<platform>-<arch>`
+ * ships the real DolphinTool executable built from the same Dolphin source release, gated by
+ * npm's os/cpu fields so only the matching platform package actually installs.
+ */
+async function resolveBundledDolphinTool(): Promise<string | null> {
+  try {
+    const mod = (await import(`@emmercm/dolphin-tool-${process.platform}-${process.arch}`)) as { default: unknown };
+    const binPath = mod.default;
+    if (typeof binPath === "string" && existsSync(binPath)) return binPath;
+  } catch {
+    // Optional platform package not installed (wrong OS/arch, or `npm install --no-optional`) — fine, just unavailable.
+  }
+  return null;
+}
+
+const bundledDolphinTool = await resolveBundledDolphinTool();
+
 export type ToolId = "chdman" | "sevenZip" | "dolphinTool" | "maxcso";
 
 export interface ToolInfo {
@@ -55,8 +74,9 @@ const SPECS: ToolSpec[] = [
     name: "DolphinTool",
     required: false,
     purpose: "Converts GameCube/Wii ISOs to RVZ. Without it, GC/Wii images are copied as-is (no compression).",
-    installHint: "brew install --cask dolphin",
+    installHint: "Bundled automatically via npm — run `npm install` if missing. (The Dolphin.app cask itself doesn't include DolphinTool.)",
     candidates: [
+      ...(bundledDolphinTool ? [bundledDolphinTool] : []),
       "DolphinTool",
       "/Applications/Dolphin.app/Contents/MacOS/DolphinTool",
     ],

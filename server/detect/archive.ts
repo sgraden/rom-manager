@@ -8,21 +8,35 @@ export interface ArchiveEntry {
 
 /**
  * Parses `7zz l -slt` output. Entries are blank-line-separated blocks of
- * `Key = Value` lines; the very first block describes the archive itself
- * (no `Folder =` line) and is excluded by requiring that field.
+ * `Key = Value` lines; the very first block describes the archive itself and is excluded.
+ *
+ * .zip listings mark each entry with `Folder = +/-`. .7z listings omit that field entirely
+ * and mark directories via a `D` flag at the start of `Attributes` instead (e.g.
+ * "D drwxr-xr-x" vs "A -rw-r--r--") — both are checked so both container formats work; the
+ * archive's own metadata block has neither and is correctly excluded either way.
  */
 export function parseSevenZipListing(output: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
 
   for (const block of output.split(/\r?\n\r?\n/)) {
     const pathMatch = block.match(/^Path = (.+)$/m);
+    if (!pathMatch) continue;
+
     const folderMatch = block.match(/^Folder = ([+-])$/m);
-    if (!pathMatch || !folderMatch) continue;
+    const attributesMatch = block.match(/^Attributes = (\S+)/m);
+    let isDirectory: boolean;
+    if (folderMatch) {
+      isDirectory = folderMatch[1] === "+";
+    } else if (attributesMatch) {
+      isDirectory = attributesMatch[1] === "D";
+    } else {
+      continue;
+    }
 
     const sizeMatch = block.match(/^Size = (\d+)$/m);
     entries.push({
       name: pathMatch[1],
-      isDirectory: folderMatch[1] === "+",
+      isDirectory,
       size: sizeMatch ? Number(sizeMatch[1]) : 0,
     });
   }

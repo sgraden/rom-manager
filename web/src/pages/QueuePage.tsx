@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { subscribeJobEvents, cancelJob, type JobInfo } from "../api";
+import { ActionBar } from "../ActionBar";
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "—";
@@ -52,6 +53,7 @@ function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => voi
         )}
         {job.error && <div className="warning-line">⚠ {job.error}</div>}
         {job.m3uWritten && <div className="muted">Playlist written: {job.m3uWritten}</div>}
+        {job.datMatch && <div className="muted">DAT match: {job.datMatch}</div>}
       </td>
       <td>
         <SizeCell job={job} />
@@ -63,7 +65,7 @@ function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => voi
   );
 }
 
-export function QueuePage() {
+export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
   const [jobs, setJobs] = useState<Map<string, JobInfo>>(new Map());
   const [order, setOrder] = useState<string[]>([]);
 
@@ -94,11 +96,19 @@ export function QueuePage() {
   }
 
   const jobList = order.map((id) => jobs.get(id)).filter((j): j is JobInfo => !!j);
+  const activeCount = jobList.filter((j) => j.state === "queued" || j.state === "running").length;
+  const doneCount = jobList.filter((j) => j.state === "done").length;
+  const failedCount = jobList.filter((j) => j.state === "failed").length;
 
   if (jobList.length === 0) {
     return (
       <div className="queue-page">
-        <p className="muted">No jobs yet — build and process a plan on the Review tab.</p>
+        <p className="muted">No jobs yet — add files on the Drop tab and build a plan to get started.</p>
+        <ActionBar status={null}>
+          <button type="button" className="button-primary" onClick={onDropMore}>
+            Go to Drop
+          </button>
+        </ActionBar>
       </div>
     );
   }
@@ -122,6 +132,19 @@ export function QueuePage() {
           ))}
         </tbody>
       </table>
+
+      <ActionBar
+        status={
+          <span className="muted">
+            {activeCount > 0 ? `${activeCount} in progress. ` : ""}
+            {doneCount} done{failedCount > 0 ? `, ${failedCount} failed` : ""}.
+          </span>
+        }
+      >
+        <button type="button" className="button-primary" onClick={onDropMore}>
+          Drop more files
+        </button>
+      </ActionBar>
     </div>
   );
 }

@@ -1,16 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
-import {
-  fetchTargets,
-  ingestPath,
-  uploadFile,
-  browseDir,
-  planJobs,
-  type TargetInfo,
-  type BrowseEntry,
-  type PlannedJob,
-} from "../api";
+import { fetchTargets, ingestPath, uploadFile, browseNative, planJobs, type TargetInfo, type PlannedJob } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
 import { Spinner } from "../Spinner";
+import { ActionBar } from "../ActionBar";
 
 interface QueuedSource {
   key: string;
@@ -36,9 +28,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
   const [planning, setPlanning] = useState(false);
   const slowPlanning = useSlowFlag(planning);
   const [dragActive, setDragActive] = useState(false);
-
-  const [browserOpen, setBrowserOpen] = useState(false);
-  const [browseState, setBrowseState] = useState<{ dir: string; parent: string | null; entries: BrowseEntry[] } | null>(null);
+  const [browsing, setBrowsing] = useState(false);
 
   useEffect(() => {
     fetchTargets()
@@ -97,14 +87,16 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
     setSources((prev) => prev.filter((s) => s.key !== key));
   }
 
-  async function openBrowser(dir?: string) {
+  async function handleBrowseNative() {
     setError(null);
+    setBrowsing(true);
     try {
-      const result = await browseDir(dir);
-      setBrowseState(result);
-      setBrowserOpen(true);
+      const { files } = await browseNative();
+      for (const file of files) addIngested(file);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBrowsing(false);
     }
   }
 
@@ -182,40 +174,10 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
             onKeyDown={(e) => e.key === "Enter" && handleAddPath()}
           />
           <button onClick={handleAddPath}>Add</button>
-          <button onClick={() => openBrowser()}>Browse…</button>
+          <button onClick={handleBrowseNative} disabled={browsing}>
+            {browsing ? "Waiting for Finder…" : "Browse…"}
+          </button>
         </div>
-
-        {browserOpen && browseState && (
-          <div className="file-browser">
-            <div className="file-browser-header">
-              <span className="mono">{browseState.dir}</span>
-              <button onClick={() => setBrowserOpen(false)}>Close</button>
-            </div>
-            <ul>
-              {browseState.parent && (
-                <li className="file-browser-row" onClick={() => openBrowser(browseState.parent!)}>
-                  ⬆ ..
-                </li>
-              )}
-              {browseState.entries.map((entry) => (
-                <li
-                  key={entry.path}
-                  className="file-browser-row"
-                  onClick={() => {
-                    if (entry.isDirectory) openBrowser(entry.path);
-                    else {
-                      addIngested(entry);
-                      setBrowserOpen(false);
-                    }
-                  }}
-                >
-                  {entry.isDirectory ? "📁" : "📄"} {entry.name}
-                  {!entry.isDirectory && <span className="muted"> — {formatBytes(entry.size)}</span>}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </section>
 
       <section>
@@ -245,20 +207,26 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
             </tbody>
           </table>
         )}
-        <div className="build-plan-row">
-          <button onClick={handleBuildPlan} disabled={readyCount === 0 || !targetName || planning}>
-            {planning ? "Building plan…" : `Build Plan (${readyCount})`}
-          </button>
-          {planning && (
+      </section>
+
+      <ActionBar
+        status={
+          planning ? (
             <span className="inline-status">
               <Spinner />
               {slowPlanning
                 ? "Still working — inspecting archived or multi-disc files takes longer."
                 : "Detecting systems and checking destinations…"}
             </span>
-          )}
-        </div>
-      </section>
+          ) : (
+            <span className="muted">{readyCount > 0 ? `${readyCount} file${readyCount === 1 ? "" : "s"} ready.` : "Add files to get started."}</span>
+          )
+        }
+      >
+        <button type="button" className="button-primary" onClick={handleBuildPlan} disabled={readyCount === 0 || !targetName || planning}>
+          {planning ? "Building plan…" : `Build Plan (${readyCount})`}
+        </button>
+      </ActionBar>
     </div>
   );
 }

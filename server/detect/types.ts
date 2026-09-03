@@ -19,4 +19,10 @@ export interface DetectionResult {
   warnings?: string[];
   /** Other files this detection depended on (e.g. a .cue's referenced .bin tracks, or the source archive). */
   relatedFiles?: string[];
+  /**
+   * The real size of the content this detection actually inspected, when it differs from the
+   * source file's own size on disk — e.g. an archive's extracted entry, which is what matters
+   * for size estimates and sector-alignment checks, not the archive's compressed size.
+   */
+  contentBytes?: number;
 }

@@ -1,12 +1,29 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, afterAll, vi } from "vitest";
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { randomFillSync } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+// Every successful job appends a record to LIBRARY_PATH — redirect it to a
+// scratch file so running this suite never writes fake entries into the
+// real data/library.json. STAGING_DIR is preserved unchanged, since several
+// tests below rely on the real one for staged-upload cleanup behavior.
+vi.mock("../lib/paths.js", async () => {
+  const actual = await vi.importActual<typeof import("../lib/paths.js")>("../lib/paths.js");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  return { ...actual, LIBRARY_PATH: path.join(os.tmpdir(), "rom-manager-queue-test-library.json") };
+});
+
 import { JobQueue, type ToolPaths } from "./queue.js";
 import type { PlannedJob } from "../library/plan.js";
 import { detectTools } from "../convert/tools.js";
-import { STAGING_DIR } from "../lib/paths.js";
+import { STAGING_DIR, LIBRARY_PATH } from "../lib/paths.js";
+
+afterAll(() => {
+  rmSync(LIBRARY_PATH, { force: true });
+});
 
 // This test suite runs real chdman/7zz conversions end to end. It only ever
 // writes into a scratch temp directory standing in as a "target" — never
@@ -14,12 +31,14 @@ import { STAGING_DIR } from "../lib/paths.js";
 const tools = detectTools({ chdman: null, sevenZip: null, dolphinTool: null, maxcso: null });
 const chdman = tools.find((t) => t.id === "chdman");
 const sevenZip = tools.find((t) => t.id === "sevenZip");
+const dolphinTool = tools.find((t) => t.id === "dolphinTool");
 const toolPaths: ToolPaths = {
   chdmanPath: chdman?.found ? chdman.path : null,
   sevenZipPath: sevenZip?.found ? sevenZip.path : null,
-  dolphinToolPath: null,
+  dolphinToolPath: dolphinTool?.found ? dolphinTool.path : null,
 };
 const maybeIt = toolPaths.chdmanPath && toolPaths.sevenZipPath ? it : it.skip;
+const maybeItDolphin = maybeIt === it && toolPaths.dolphinToolPath ? it : it.skip;
 
 const dirs: string[] = [];
 function makeTempDir(): string {
@@ -56,6 +75,27 @@ function makeRawCdTrack(dir: string, name: string, sectors = 10): { cuePath: str
 /** DVD data has no CD sector framing — just flat bytes, sized as a multiple of the 2048-byte DVD sector. */
 function makeDvdData(filePath: string, sectors = 20): void {
   writeFileSync(filePath, Buffer.alloc(sectors * 2048));
+}
+
+/** Raw CD-sector-framed bytes (2352/sector, MODE1) — chdman's CD-aware codecs need this structure to round-trip. */
+function makeRawCdData(sectors: number): Buffer {
+  const sectorSize = 2352;
+  const data = Buffer.alloc(sectors * sectorSize);
+  for (let s = 0; s < sectors; s++) {
+    const off = s * sectorSize;
+    data[off] = 0x00;
+    data.fill(0xff, off + 1, off + 11);
+    data[off + 11] = 0x00;
+    data[off + 15] = 0x01; // MODE1
+  }
+  return data;
+}
+
+/** A minimal GameCube disc image — just enough for DolphinTool to recognize and convert it (the GC magic word at offset 0x1c). */
+function makeGameCubeIso(filePath: string, sizeBytes = 4 * 1024 * 1024): void {
+  const data = Buffer.alloc(sizeBytes);
+  data.writeUInt32BE(0xc2339f3d, 0x1c);
+  writeFileSync(filePath, data);
 }
 
 /** A larger, real-content CD track (not degenerate/all-zero) — takes chdman long enough to observe two jobs overlapping. */
@@ -114,6 +154,86 @@ function fakePlannedJob(overrides: Partial<PlannedJob> & { sourcePath: string })
 }
 
 describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
+  maybeIt("records a library.json entry with real hashes after a successful job", async () => {
+    const { loadDatIndex } = await import("../library/dat.js");
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const srcDir = makeTempDir();
+    const romPath = path.join(srcDir, "game.nes");
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(romPath, romBuf);
+
+    const queue = new JobQueue(() => 1, () => true, () => toolPaths, () => false, () => 0, loadDatIndex("/nonexistent"));
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: romPath,
+        selectedSystemId: "nes",
+        action: "keep-zip",
+        destinationFolder: path.join(destDir, "nes"),
+        destinationFilename: "game.zip",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.datMatch).toBeNull();
+
+    // Give the async recordLibraryEntry (which runs after "done" is reported) a moment to land.
+    await new Promise((r) => setTimeout(r, 100));
+
+    const records = JSON.parse(readFileSync(LIBRARY_PATH, "utf-8"));
+    const record = records.find((r: { originalName: string }) => r.originalName === "game.nes");
+    expect(record).toBeDefined();
+    // Ground truth computed independently in the same way as hash.test.ts.
+    expect(record.hashes.crc32).toBe("9ed2bab3");
+    expect(record.hashes.md5).toBe("e4e449ab0c2479e7a99a0671c13c0ce6");
+    expect(record.hashes.sha1).toBe("36d39bfdabfcec6c8cd6c61fb0ee8f6b2f758669");
+    expect(record.system).toBe("nes");
+    expect(record.destination).toBe(path.join(destDir, "nes", "game.zip"));
+    expect(record.datMatch).toBeNull();
+  });
+
+  maybeIt("surfaces a DAT match as informational metadata without renaming the destination file", async () => {
+    const { loadDatIndex } = await import("../library/dat.js");
+    const datsDir = makeTempDir();
+    writeFileSync(
+      path.join(datsDir, "nes.dat"),
+      `<datafile><game name="Real Game"><rom name="Real Game (USA) [!].nes" crc="9ed2bab3" md5="e4e449ab0c2479e7a99a0671c13c0ce6" sha1="36d39bfdabfcec6c8cd6c61fb0ee8f6b2f758669"/></game></datafile>`,
+    );
+    const datIndex = loadDatIndex(datsDir);
+    expect(datIndex.romCount).toBe(1);
+
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+    const srcDir = makeTempDir();
+    const romPath = path.join(srcDir, "game.nes"); // deliberately NOT the DAT's canonical name
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(romPath, romBuf);
+
+    const queue = new JobQueue(() => 1, () => true, () => toolPaths, () => false, () => 0, datIndex);
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: romPath,
+        selectedSystemId: "nes",
+        action: "keep-zip",
+        destinationFolder: path.join(destDir, "nes"),
+        destinationFilename: "game.zip",
+      }),
+    );
+
+    await waitForTerminal(queue, job.id);
+    // datMatch arrives via a follow-up SSE-style update after hashing completes, not necessarily by the time waitForTerminal resolves.
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(queue.get(job.id)?.datMatch).toBe("Real Game (USA) [!].nes");
+    // The file on disk keeps the name it was planned with — a DAT match is informational only, v1 never renames.
+    expect(existsSync(path.join(destDir, "nes", "game.zip"))).toBe(true);
+    expect(existsSync(path.join(destDir, "nes", "Real Game (USA) [!].nes"))).toBe(false);
+  });
+
   maybeIt("actually runs two jobs concurrently when maxConcurrentJobs is 2, not just sequentially", async () => {
     const srcDir = makeTempDir();
     const destDir = makeTempDir();
@@ -219,6 +339,239 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     const finished = await waitForTerminal(queue, job.id);
     expect(finished?.state).toBe("done");
     expect(existsSync(path.join(destDir, "ps2", "My PS2 Game.chd"))).toBe(true);
+  });
+
+  maybeIt("copies rather than re-converts a source that's already a .chd", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "ps2"));
+
+    const chdPath = path.join(srcDir, "Already Converted.chd");
+    writeFileSync(chdPath, "not a real chd, just needs to be copied as-is");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: chdPath,
+        selectedSystemId: "ps2",
+        action: "chd-cd",
+        destinationFolder: path.join(destDir, "ps2"),
+        destinationFilename: "Already Converted.chd",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(readFileSync(path.join(destDir, "ps2", "Already Converted.chd"), "utf-8")).toBe(
+      "not a real chd, just needs to be copied as-is",
+    );
+  });
+
+  maybeIt("copies rather than re-converts a source that's already a .rvz, even without DolphinTool available", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "gamecube"));
+
+    const rvzPath = path.join(srcDir, "Already Converted.rvz");
+    writeFileSync(rvzPath, "not a real rvz, just needs to be copied as-is");
+
+    // dolphinToolPath deliberately left out — copying an already-.rvz source must not require it.
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => ({ ...toolPaths, dolphinToolPath: null }),
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: rvzPath,
+        selectedSystemId: "gamecube",
+        action: "rvz",
+        destinationFolder: path.join(destDir, "gamecube"),
+        destinationFilename: "Already Converted.rvz",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(readFileSync(path.join(destDir, "gamecube", "Already Converted.rvz"), "utf-8")).toBe(
+      "not a real rvz, just needs to be copied as-is",
+    );
+  });
+
+  maybeIt("finds and copies an already-.rvz file inside a .zip (the Smugglers Run: Warzones case)", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "gamecube"));
+
+    const rvzPath = path.join(srcDir, "Smugglers Run - Warzones (USA).rvz");
+    writeFileSync(rvzPath, "not a real rvz, just needs to be copied as-is");
+    const zipPath = path.join(srcDir, "Smugglers Run - Warzones (USA).zip");
+    const zipResult = spawnSync("7zz", ["a", "-tzip", zipPath, rvzPath], { encoding: "utf-8" });
+    expect(zipResult.status).toBe(0);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => ({ ...toolPaths, dolphinToolPath: null }),
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: zipPath,
+        selectedSystemId: "gamecube",
+        action: "rvz",
+        destinationFolder: path.join(destDir, "gamecube"),
+        destinationFilename: "Smugglers Run - Warzones (USA).rvz",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.error).toBeNull();
+    expect(existsSync(path.join(destDir, "gamecube", "Smugglers Run - Warzones (USA).rvz"))).toBe(true);
+  });
+
+  maybeIt("converts an archived CD-mode PS2 dump via chd-cd (the Smuggler's Run case: chd-dvd would reject this sector alignment)", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "ps2"));
+
+    // Same raw-sector construction as makeRawCdTrack, saved as a bare .iso (no .cue) and
+    // archived — mirrors a real CD-based PS2 dump like Smuggler's Run, which plan.ts now
+    // routes to chd-cd instead of the ps2 default of chd-dvd (see plan.test.ts).
+    const isoPath = path.join(srcDir, "Smuggler's Run (USA).iso");
+    writeFileSync(isoPath, makeRawCdData(10));
+
+    const archivePath = path.join(srcDir, "Smuggler's Run (USA).7z");
+    const zipResult = spawnSync("7zz", ["a", "-t7z", archivePath, isoPath], { encoding: "utf-8" });
+    expect(zipResult.status).toBe(0);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: archivePath,
+        selectedSystemId: "ps2",
+        action: "chd-cd",
+        destinationFolder: path.join(destDir, "ps2"),
+        destinationFilename: "Smuggler's Run (USA).chd",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.error).toBeNull();
+    expect(existsSync(path.join(destDir, "ps2", "Smuggler's Run (USA).chd"))).toBe(true);
+  });
+
+  maybeIt("self-corrects to chd-cd at conversion time even when a job is enqueued with the wrong chd-dvd action already locked in", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "ps2"));
+
+    // Plan-time detection can miss the CD-vs-DVD signal (e.g. an archive with more than one
+    // entry never gets its real content size measured) and hand the queue a job whose action
+    // is already locked in as the wrong chd-dvd. This is queue.ts's own safety net: it checks
+    // the actual resolved bytes right before invoking chdman, so the job still succeeds instead
+    // of failing with chdman's opaque "Data size ... is not divisible by sector size 2048".
+    const isoPath = path.join(srcDir, "Smuggler's Run (USA).iso");
+    writeFileSync(isoPath, makeRawCdData(10));
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: isoPath,
+        selectedSystemId: "ps2",
+        action: "chd-dvd", // deliberately wrong — the point of this test
+        destinationFolder: path.join(destDir, "ps2"),
+        destinationFilename: "Smuggler's Run (USA).chd",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.error).toBeNull();
+    expect(finished?.action).toBe("chd-cd"); // corrected so the Queue page shows what actually ran
+    expect(existsSync(path.join(destDir, "ps2", "Smuggler's Run (USA).chd"))).toBe(true);
+  });
+
+  maybeIt("reports real intermediate progress during a chdman conversion, not just stuck 0% until done", async () => {
+    // chdman's own "Compressing, N% complete" stdout is silently suppressed by chdman itself
+    // whenever it's piped rather than attached to a TTY — exactly how child_process.spawn
+    // connects to it — so a real multi-minute conversion previously reported 0% the entire
+    // time even though it was working correctly. createChd now polls the growing output
+    // file's size instead; this proves that poll actually surfaces mid-flight percentages.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+
+    const disc = makeSlowCdTrack(srcDir, "Slow Game", 20000);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const enqueued = queue.enqueue(
+      fakePlannedJob({ sourcePath: disc.cuePath, destinationFolder: path.join(destDir, "psx"), destinationFilename: "Slow Game.chd" }),
+    );
+
+    const percentsWhileConverting: number[] = [];
+    queue.on("update", (job) => {
+      if (job.id === enqueued.id && job.phase === "converting") percentsWhileConverting.push(job.percent);
+    });
+
+    const finished = await waitForTerminal(queue, enqueued.id, 30000);
+    expect(finished?.state).toBe("done");
+    expect(percentsWhileConverting.some((p) => p > 0 && p < 100)).toBe(true);
+  });
+
+  maybeItDolphin("converts a GameCube ISO to RVZ via the npm-bundled DolphinTool", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "gamecube"));
+
+    const isoPath = path.join(srcDir, "My GC Game.iso");
+    makeGameCubeIso(isoPath);
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: isoPath,
+        selectedSystemId: "gamecube",
+        action: "rvz",
+        destinationFolder: path.join(destDir, "gamecube"),
+        destinationFilename: "My GC Game.rvz",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.error).toBeNull();
+    const destPath = path.join(destDir, "gamecube", "My GC Game.rvz");
+    expect(existsSync(destPath)).toBe(true);
+    expect(finished?.resultBytes).toBeGreaterThan(0);
   });
 
   maybeIt("resolves a .cue's referenced data file directly for chd-dvd, since createdvd can't parse cue sheets", async () => {

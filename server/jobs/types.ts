@@ -21,4 +21,6 @@ export interface Job {
   startedAt: string | null;
   finishedAt: string | null;
   m3uWritten: string | null;
+  /** Canonical name from a DAT match, set shortly after the job finishes (hashing runs after "done" so it never delays completion). Purely informational — never renames anything. */
+  datMatch: string | null;
 }

@@ -1,47 +1,58 @@
 import { Router } from "express";
-import { readdirSync, statSync } from "node:fs";
-import os from "node:os";
+import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import path from "node:path";
 
 export const browseRouter = Router();
 
-interface BrowseEntry {
-  name: string;
+interface NativeBrowseFile {
   path: string;
-  isDirectory: boolean;
+  name: string;
   size: number;
 }
 
-/** Lists a directory's contents — backs the Drop page's server-side folder browser. */
-browseRouter.get("/", (req, res) => {
-  const requested = typeof req.query.dir === "string" && req.query.dir.length > 0 ? req.query.dir : os.homedir();
-  const dir = path.resolve(requested);
+// `choose file` is a Standard Additions dialog run in osascript's own process — it doesn't
+// send an Apple Event to another app, so it needs no Automation/TCC permission grant.
+const CHOOSE_FILE_SCRIPT = `
+try
+  activate
+  set theFiles to choose file with prompt "Select ROM files to add" with multiple selections allowed
+on error number -128
+  return ""
+end try
+set thePaths to {}
+repeat with aFile in theFiles
+  set end of thePaths to POSIX path of aFile
+end repeat
+set AppleScript's text item delimiters to linefeed
+return thePaths as text
+`;
 
-  let dirEntries;
-  try {
-    dirEntries = readdirSync(dir, { withFileTypes: true });
-  } catch (err) {
-    res.status(400).json({ error: `Cannot read directory: ${err instanceof Error ? err.message : String(err)}` });
+/** Opens the real macOS file-open panel and returns whatever the user picked (or nothing, if they cancelled). */
+browseRouter.post("/native", (req, res) => {
+  if (process.platform !== "darwin") {
+    res.status(400).json({ error: "The native file picker is only available on macOS." });
     return;
   }
 
-  const entries: BrowseEntry[] = dirEntries
-    .filter((e) => !e.name.startsWith("."))
-    .map((e) => {
-      const full = path.join(dir, e.name);
-      const isDirectory = e.isDirectory();
-      let size = 0;
-      if (!isDirectory) {
-        try {
-          size = statSync(full).size;
-        } catch {
-          // Unreadable entry (permissions, broken symlink) — leave size at 0 rather than failing the whole listing.
-        }
-      }
-      return { name: e.name, path: full, isDirectory, size };
-    })
-    .sort((a, b) => (a.isDirectory !== b.isDirectory ? (a.isDirectory ? -1 : 1) : a.name.localeCompare(b.name)));
+  execFile("osascript", ["-e", CHOOSE_FILE_SCRIPT], { maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    if (err) {
+      res.status(500).json({ error: `Couldn't open the file picker: ${err.message}` });
+      return;
+    }
 
-  const parent = path.dirname(dir);
-  res.json({ dir, parent: parent !== dir ? parent : null, entries });
+    const files: NativeBrowseFile[] = stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((filePath) => {
+        try {
+          return [{ path: filePath, name: path.basename(filePath), size: statSync(filePath).size }];
+        } catch {
+          return [];
+        }
+      });
+
+    res.json({ files });
+  });
 });

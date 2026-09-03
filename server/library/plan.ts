@@ -92,10 +92,27 @@ function buildOne(
   const detection = detectPath(sourcePath, options);
   if (detection.warnings) warnings.push(...detection.warnings);
 
+  // For an archive, statSync above measured the *compressed* .7z/.zip size — size estimates,
+  // free-space checks, and the sector-alignment check below all need the real decompressed
+  // content size instead, when detection was able to determine it.
+  if (detection.contentBytes !== undefined) {
+    sourceBytes = detection.contentBytes;
+  }
+
   const topCandidate = detection.candidates[0] ?? null;
   const selectedSystemId = override?.systemId ?? topCandidate?.systemId ?? null;
   const system = selectedSystemId ? getSystem(selectedSystemId) : undefined;
-  const action = override?.action ?? system?.defaultAction ?? null;
+  let action = override?.action ?? system?.defaultAction ?? null;
+
+  // PS2 uniquely (among our chd-dvd-default systems) shipped on both CD-ROM and DVD-ROM —
+  // early titles like Smuggler's Run are CD-based. A raw CD dump's size is an exact multiple
+  // of a 2352-byte sector but not a 2048-byte one; chdman's createdvd rejects that outright
+  // (see cuegen.ts, which uses the same signal for bare .bin files). Catch it here instead of
+  // letting the job fail with an opaque chdman error after the user clicks Process.
+  if (!override?.action && selectedSystemId === "ps2" && action === "chd-dvd" && sourceBytes > 0 && sourceBytes % 2352 === 0 && sourceBytes % 2048 !== 0) {
+    action = "chd-cd";
+    warnings.push("Detected as a CD-mode PS2 dump (size is a multiple of 2352 bytes, not 2048) — using chd-cd instead of the usual chd-dvd.");
+  }
 
   // Only warn about detection confidence when the user hasn't already made the call themselves.
   if (!override?.systemId) {

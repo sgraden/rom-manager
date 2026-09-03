@@ -28,6 +28,9 @@ import { parseCueFile, parseGdiFile, resolveCcdCompanions } from "../detect/cues
 import { getFreeBytes } from "../library/targets.js";
 import { isPathInside, estimateOutputBytes } from "../library/fsutil.js";
 import { threadsPerJob } from "../library/cpuBudget.js";
+import { hashFile } from "../library/hash.js";
+import { appendLibraryRecord } from "../library/libraryLog.js";
+import type { DatIndex } from "../library/dat.js";
 import { STAGING_DIR } from "../lib/paths.js";
 import type { Job } from "./types.js";
 
@@ -82,6 +85,7 @@ export class JobQueue extends EventEmitter {
     private getTools: () => ToolPaths,
     private getDeleteSourceAfterSuccess: () => boolean = () => false,
     private getReservedCores: () => number = () => 0,
+    private datIndex: DatIndex = { lookup: () => null, datFileCount: 0, romCount: 0 },
   ) {
     super();
   }
@@ -130,6 +134,7 @@ export class JobQueue extends EventEmitter {
       startedAt: null,
       finishedAt: null,
       m3uWritten: null,
+      datMatch: null,
     };
 
     this.jobs.set(id, job);
@@ -195,31 +200,33 @@ export class JobQueue extends EventEmitter {
     return discSet.trackFiles[0];
   }
 
-  private async resolveDiscInput(job: Job, tools: ToolPaths, discImageExts: string[]): Promise<{ inputPath: string; cleanupDir: string | null }> {
+  /**
+   * Resolves the source down to its actual disc-image bytes, independent of job.action — the
+   * createcd-vs-createdvd decision (including the CD-sector-alignment safety net in runJob)
+   * needs the real data file's size regardless of which mode was originally planned, and must
+   * not have already discarded a cue sheet's track/mode metadata before that decision is made.
+   * `dataPath` is the raw data file (for size checks, and the only valid createdvd input);
+   * `cuePath`, when present, is what createcd should prefer — feeding it a bare data file
+   * instead forces chdman to guess a single MODE1/2352 track from raw bytes, which silently
+   * discards any real multi-track/mode structure a genuine multi-track disc has.
+   */
+  private async resolveDiscSource(
+    job: Job,
+    tools: ToolPaths,
+    discImageExts: string[],
+  ): Promise<{ dataPath: string; cuePath: string | null; cleanupDir: string | null }> {
     const ext = path.extname(job.sourcePath).toLowerCase();
 
     if (discImageExts.includes(ext)) {
-      return { inputPath: job.sourcePath, cleanupDir: null };
+      return { dataPath: job.sourcePath, cuePath: null, cleanupDir: null };
     }
 
     if (CUE_LIKE_EXTS.includes(ext)) {
-      // chdman's createcd parses .cue/.gdi/.ccd itself; createdvd does not —
-      // it reads whatever -i points to as raw bytes, so handing it a cue
-      // sheet "converts" the cue's own text instead of erroring cleanly.
-      if (job.action === "chd-cd") {
-        return { inputPath: job.sourcePath, cleanupDir: null };
-      }
-      return { inputPath: this.resolveCueToDataFile(job.sourcePath), cleanupDir: null };
+      return { dataPath: this.resolveCueToDataFile(job.sourcePath), cuePath: job.sourcePath, cleanupDir: null };
     }
 
     if (ext === ".bin") {
-      // cuegen synthesizes CD sector-mode metadata (MODE1/2352 etc.), which is
-      // meaningless for DVD data — a DVD image is just flat bytes, no cue needed.
-      if (job.action === "chd-dvd") {
-        return { inputPath: job.sourcePath, cleanupDir: null };
-      }
-      const { cuePath, tmpDir } = generateCueForBin(job.sourcePath, job.sourceBytes);
-      return { inputPath: cuePath, cleanupDir: tmpDir };
+      return { dataPath: job.sourcePath, cuePath: null, cleanupDir: null };
     }
 
     if (ARCHIVE_EXTS.includes(ext)) {
@@ -228,15 +235,25 @@ export class JobQueue extends EventEmitter {
       await extractArchiveAsync(tools.sevenZipPath, job.sourcePath, dir, {
         registerProcess: (child) => this.processes.set(job.id, child),
       });
-      const found = findFirstMatch(dir, [...CUE_LIKE_EXTS, ...discImageExts]);
-      if (!found) throw new Error("Archive did not contain a usable disc image.");
-      if (job.action === "chd-dvd" && CUE_LIKE_EXTS.includes(path.extname(found).toLowerCase())) {
-        return { inputPath: this.resolveCueToDataFile(found), cleanupDir: dir };
+      const wantedExts = [...CUE_LIKE_EXTS, ...discImageExts];
+      const found = findFirstMatch(dir, wantedExts);
+      if (!found) {
+        throw new Error(
+          `This archive doesn't contain a file this action knows how to use — looked for ${wantedExts.join(", ")} anywhere inside it. ` +
+            `If the game is in there under a different extension, extract it yourself and add that file directly, or pick a different action.`,
+        );
       }
-      return { inputPath: found, cleanupDir: dir };
+      if (CUE_LIKE_EXTS.includes(path.extname(found).toLowerCase())) {
+        return { dataPath: this.resolveCueToDataFile(found), cuePath: found, cleanupDir: dir };
+      }
+      return { dataPath: found, cuePath: null, cleanupDir: dir };
     }
 
-    throw new Error(`Don't know how to convert "${ext}" files for action "${job.action}".`);
+    throw new Error(
+      `This action doesn't know how to use a "${ext}" file — it expects a disc image (${discImageExts.join(", ")}), ` +
+        `a cue sheet (${CUE_LIKE_EXTS.join(", ")}), a bare .bin, or an archive (${ARCHIVE_EXTS.join(", ")}) containing one of those. ` +
+        `Pick a different action for this file, or double-check it's the right one.`,
+    );
   }
 
   private copyPlain(sourcePath: string, destPath: string, onProgress?: (percent: number, phase: string) => void): Promise<void> {
@@ -291,6 +308,7 @@ export class JobQueue extends EventEmitter {
     this.emitUpdate(job);
 
     let tmpDir: string | null = null;
+    let genCueDir: string | null = null;
     const partPath = `${job.destinationPath}.part`;
 
     try {
@@ -334,16 +352,64 @@ export class JobQueue extends EventEmitter {
         case "chd-cd":
         case "chd-dvd": {
           if (!tools.chdmanPath) throw new Error("chdman is not available.");
-          const resolved = await this.resolveDiscInput(job, tools, [".iso"]);
+          const resolved = await this.resolveDiscSource(job, tools, [".iso", ".chd"]);
           tmpDir = resolved.cleanupDir;
-          const inputDir = path.dirname(resolved.inputPath);
+
+          if (path.extname(resolved.dataPath).toLowerCase() === ".chd") {
+            // Already a CHD (bare, or found inside an archive) — nothing to convert, mirrors
+            // the same already-in-target-format fast path keep-zip already takes for .zip.
+            job.phase = "copying";
+            this.emitUpdate(job);
+            await this.copyPlain(resolved.dataPath, partPath, onProgress);
+            break;
+          }
+
+          // plan.ts already prefers createcd for a CD-sector-aligned PS2 source, but that
+          // depends on detection having measured the real content size — an archive with more
+          // than one entry (e.g. a scene .7z with an .nfo alongside the .iso) currently skips
+          // that measurement and falls through to the ps2 default of chd-dvd. Check the actual
+          // resolved data file's bytes here too, since that's always accurate regardless of how
+          // detection went, so this never fails on a merely mislabeled action.
+          let chdMode: "createcd" | "createdvd" = job.action === "chd-cd" ? "createcd" : "createdvd";
+          if (chdMode === "createdvd") {
+            const dataBytes = statSync(resolved.dataPath).size;
+            if (dataBytes > 0 && dataBytes % 2352 === 0 && dataBytes % 2048 !== 0) {
+              chdMode = "createcd";
+              job.action = "chd-cd"; // keep the Queue page's displayed action truthful
+            }
+          }
+
+          // createdvd always needs the raw data file — it can't parse a cue sheet at all.
+          // createcd should prefer a real cue when resolveDiscSource found one; a bare data
+          // file forces chdman to guess a single MODE1/2352 track from raw bytes, which is
+          // both unreliable and — confirmed against a real multi-track disc — dramatically
+          // slower than giving it the track/mode info it needs up front. Synthesize a cue via
+          // the same sector-mode detection generateCueForBin already uses for standalone .bin
+          // sources whenever no real cue is available.
+          let inputPath = resolved.dataPath;
+          if (chdMode === "createcd") {
+            if (resolved.cuePath) {
+              inputPath = resolved.cuePath;
+            } else {
+              // chdman resolves a cue's FILE line relative to the .cue's own directory, not
+              // cwd (confirmed against a real chdman 0.289 run) — generateCueForBin already
+              // accounts for that with a proper path.relative() reference, so cwd here is
+              // just a sane default, not load-bearing for resolving the bin reference.
+              const gen = generateCueForBin(resolved.dataPath, statSync(resolved.dataPath).size);
+              inputPath = gen.cuePath;
+              genCueDir = gen.tmpDir;
+            }
+          }
+          const inputDir = path.dirname(inputPath);
+
           job.phase = "converting";
           this.emitUpdate(job);
-          await createChd(tools.chdmanPath, resolved.inputPath, partPath, job.action === "chd-cd" ? "createcd" : "createdvd", {
+          await createChd(tools.chdmanPath, inputPath, partPath, chdMode, {
             onProgress,
             registerProcess,
             cwd: inputDir,
             threads: this.currentThreadBudget(),
+            estimatedOutputBytes: estimatedBytes,
           });
           if (this.getVerifyEnabled()) {
             if (this.cancelRequested.has(id)) throw new CancelledError();
@@ -355,15 +421,25 @@ export class JobQueue extends EventEmitter {
           break;
         }
         case "rvz": {
-          if (!tools.dolphinToolPath) throw new Error("DolphinTool is not available — install with: brew install --cask dolphin");
-          const resolved = await this.resolveDiscInput(job, tools, [".iso", ".gcm"]);
+          const resolved = await this.resolveDiscSource(job, tools, [".iso", ".gcm", ".rvz"]);
           tmpDir = resolved.cleanupDir;
+
+          if (path.extname(resolved.dataPath).toLowerCase() === ".rvz") {
+            // Already an RVZ (bare, or found inside an archive) — nothing to convert, mirrors
+            // the same already-in-target-format fast path keep-zip already takes for .zip.
+            job.phase = "copying";
+            this.emitUpdate(job);
+            await this.copyPlain(resolved.dataPath, partPath, onProgress);
+            break;
+          }
+
+          if (!tools.dolphinToolPath) throw new Error("DolphinTool is not available — run `npm install` to fetch the bundled binary.");
           job.phase = "converting";
           this.emitUpdate(job);
-          await convertToRvz(tools.dolphinToolPath, resolved.inputPath, partPath, {
+          await convertToRvz(tools.dolphinToolPath, resolved.dataPath, partPath, {
             onProgress,
             registerProcess,
-            cwd: path.dirname(resolved.inputPath),
+            cwd: path.dirname(resolved.dataPath),
           });
           break;
         }
@@ -391,7 +467,12 @@ export class JobQueue extends EventEmitter {
       job.phase = "done";
       job.finishedAt = new Date().toISOString();
       this.emitUpdate(job);
-      this.cleanupSource(job);
+
+      // Hashing runs in the background after "done" is already reported, so it never
+      // delays completion feedback, freeing the run slot for the next queued job, or the
+      // .m3u playlist write — but it must happen before cleanupSource, which may delete
+      // the source, so that stays chained onto it rather than running independently.
+      void this.recordLibraryEntry(job).then(() => this.cleanupSource(job));
     } catch (err) {
       this.processes.delete(id);
       if (existsSync(partPath)) {
@@ -413,13 +494,47 @@ export class JobQueue extends EventEmitter {
     } finally {
       this.cancelRequested.delete(id);
       this.reservedBytes.delete(id);
-      if (tmpDir) {
+      for (const dir of [tmpDir, genCueDir]) {
+        if (!dir) continue;
         try {
-          rmSync(tmpDir, { recursive: true, force: true });
+          rmSync(dir, { recursive: true, force: true });
         } catch {
           // best effort
         }
       }
+    }
+  }
+
+  /**
+   * Hashes the original source file, appends a record to data/library.json,
+   * and checks it against any loaded DAT files — purely informational, never
+   * renames anything (see PLAN.md: v1 keeps original filenames; this is the
+   * foundation a future rename command can build on without re-hashing).
+   * Best-effort: a hashing failure logs but never fails the job itself.
+   */
+  private async recordLibraryEntry(job: Job): Promise<void> {
+    try {
+      const hashes = await hashFile(job.sourcePath);
+      const datMatch = this.datIndex.lookup(hashes);
+
+      appendLibraryRecord({
+        timestamp: job.finishedAt ?? new Date().toISOString(),
+        originalName: job.sourceName,
+        hashes,
+        system: job.selectedSystemId,
+        action: job.action,
+        destination: job.destinationPath,
+        sizeBefore: job.sourceBytes,
+        sizeAfter: job.resultBytes ?? 0,
+        datMatch,
+      });
+
+      if (datMatch) {
+        job.datMatch = datMatch;
+        this.emitUpdate(job);
+      }
+    } catch (err) {
+      console.error(`Failed to record library entry for ${job.sourceName}:`, err instanceof Error ? err.message : err);
     }
   }
 

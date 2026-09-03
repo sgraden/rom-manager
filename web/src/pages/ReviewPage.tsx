@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
 import { Spinner } from "../Spinner";
+import { ActionBar } from "../ActionBar";
 
 const ACTIONS: ConvertAction[] = ["chd-cd", "chd-dvd", "rvz", "keep-zip", "copy"];
 
@@ -145,20 +146,9 @@ export function ReviewPage({
 
   return (
     <div className="review-page">
-      <div className="review-toolbar">
-        <p className="preview-banner">
-          Writing to <strong>{targetName}</strong>. Files are converted and copied when you click Process — nothing happens until then.
-        </p>
-        <button onClick={handleProcess} disabled={readyCount === 0 || processing}>
-          {processing ? "Starting…" : `Process (${readyCount})`}
-        </button>
-      </div>
-      {processing && (
-        <p className="inline-status">
-          <Spinner />
-          {slowProcessing ? "Still working — enqueueing a lot of files takes a moment." : "Starting jobs…"}
-        </p>
-      )}
+      <p className="preview-banner">
+        Writing to <strong>{targetName}</strong>. Files are converted and copied when you click Process — nothing happens until then.
+      </p>
       <details className="action-help">
         <summary>What do these actions mean?</summary>
         <ul>
@@ -253,6 +243,25 @@ export function ReviewPage({
           ))}
         </tbody>
       </table>
+
+      <ActionBar
+        status={
+          processing ? (
+            <span className="inline-status">
+              <Spinner />
+              {slowProcessing ? "Still working — enqueueing a lot of files takes a moment." : "Starting jobs…"}
+            </span>
+          ) : (
+            <span className="muted">
+              {readyCount} of {jobs.length} file{jobs.length === 1 ? "" : "s"} ready to process.
+            </span>
+          )
+        }
+      >
+        <button type="button" className="button-primary" onClick={handleProcess} disabled={readyCount === 0 || processing}>
+          {processing ? "Starting…" : `Process (${readyCount})`}
+        </button>
+      </ActionBar>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
 import { FileReader } from "./fileReader.js";
 import { detectCartridgeSignatures } from "./signatures.js";
 import { detectDiscMagic, detectIso9660, detectIpBinStrings } from "./disc.js";
@@ -145,6 +145,10 @@ function detectArchive(archivePath: string, options: DetectOptions): DetectionRe
       candidates: inner.candidates.map((c) => ({ ...c, evidence: `(inside archive) ${c.evidence}` })),
       warnings: inner.warnings,
       relatedFiles: [archivePath],
+      // The archive's own size (what the caller stat'd) is its *compressed* size — this is
+      // the real decompressed content size, which is what size estimates and sector-alignment
+      // checks actually need.
+      contentBytes: inner.contentBytes ?? statSync(targetPath).size,
     };
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

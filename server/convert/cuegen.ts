@@ -29,6 +29,15 @@ function readFirstBytes(filePath: string, length: number): Buffer {
  * of 2352; otherwise it falls back to a 2048-byte-sector guess. A wrong
  * guess here produces a CHD that won't boot, so `confident` should be
  * surfaced to the user rather than silently trusted.
+ *
+ * The cue's FILE line uses a path relative to the generated .cue's own
+ * directory, not binPath's full path — confirmed against a real chdman 0.289
+ * run that it resolves a cue's FILE reference relative to the .cue file's
+ * own location, always, regardless of the process's cwd; an absolute value
+ * there gets naively joined onto that directory anyway, producing a broken
+ * double path. Since this generated .cue lives in its own fresh scratch
+ * tmpDir rather than next to binPath, a plain basename won't reach it —
+ * path.relative() is required.
  */
 export function generateCueForBin(binPath: string, binSizeBytes: number): CueGenResult {
   let mode: string;
@@ -54,7 +63,8 @@ export function generateCueForBin(binPath: string, binSizeBytes: number): CueGen
 
   const tmpDir = mkdtempSync(path.join(tmpdir(), "rom-manager-cuegen-"));
   const cuePath = path.join(tmpDir, "generated.cue");
-  const cueContent = `FILE "${binPath}" BINARY\n  TRACK 01 ${mode}\n    INDEX 01 00:00:00\n`;
+  const relativeBinPath = path.relative(tmpDir, binPath);
+  const cueContent = `FILE "${relativeBinPath}" BINARY\n  TRACK 01 ${mode}\n    INDEX 01 00:00:00\n`;
   writeFileSync(cuePath, cueContent, "utf-8");
 
   return { cuePath, tmpDir, mode, confident };

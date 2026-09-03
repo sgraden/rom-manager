@@ -12,6 +12,7 @@ import { planRouter } from "./routes/plan.js";
 import { systemsRouter } from "./routes/systems.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { configRouter } from "./routes/config.js";
+import { datIndex } from "./jobs/queueInstance.js";
 import { WEB_DIST_DIR } from "./lib/paths.js";
 
 const config = loadConfig();
@@ -55,5 +56,11 @@ app.listen(port, () => {
     const status = tool.found ? `found (${tool.version ?? "version unknown"}) at ${tool.path}` : "NOT FOUND";
     const flag = tool.found ? "✓" : tool.required ? "✗ required" : "– optional";
     console.log(`  [${flag}] ${tool.name}: ${status}`);
+  }
+
+  if (datIndex.datFileCount > 0) {
+    console.log(`  DAT matching: ${datIndex.datFileCount} file(s) loaded, ${datIndex.romCount} known ROMs (informational only — never renames)`);
+  } else {
+    console.log(`  DAT matching: no .dat files in config/dats/ — inactive`);
   }
 });

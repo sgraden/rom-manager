@@ -63,7 +63,11 @@ describe("generateCueForBin", () => {
     dirs.push(result.tmpDir);
   });
 
-  it("writes a cue file that references the bin by absolute path", () => {
+  it("writes a cue file that references the bin via a path relative to the cue's own directory", () => {
+    // chdman 0.289 resolves a cue's FILE reference relative to the .cue file's own location,
+    // always — never the process's cwd, and never treating an embedded absolute path as
+    // already-absolute. Since the generated .cue lives in its own scratch tmpDir rather than
+    // next to binPath, the FILE line must be a proper path.relative() between the two.
     const dir = makeTempDir();
     const binPath = path.join(dir, "track.bin");
     writeFileSync(binPath, Buffer.alloc(2048));
@@ -71,7 +75,8 @@ describe("generateCueForBin", () => {
     const result = generateCueForBin(binPath, 2048);
     dirs.push(result.tmpDir);
     const content = readFileSync(result.cuePath, "utf-8");
-    expect(content).toContain(`FILE "${binPath}" BINARY`);
+    const expectedRelative = path.relative(result.tmpDir, binPath);
+    expect(content).toContain(`FILE "${expectedRelative}" BINARY`);
     expect(content).toContain("MODE1/2048");
   });
 });

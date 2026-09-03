@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { CancelledError } from "./errors.js";
 import type { RunOptions } from "./types.js";
 
 // Matches chdman's progress lines, e.g. "Compressing, 42.3% complete... (ratio=61.2%)"
-// and "Verifying, 0.0% complete...". Confirmed against a real chdman 0.289 run.
+// and "Verifying, 0.0% complete...". Confirmed against a real chdman 0.289 run — but only
+// when chdman's stdout is a TTY or a regular file. Piped (our exact spawn() setup), it
+// suppresses these lines entirely, printing only its startup header: a real, multi-minute
+// conversion completes with zero progress or completion output ever reaching this parser,
+// even though the process is working correctly. See the file-growth poll in createChd below.
 const PROGRESS_PATTERN = /(?:Compressing|Verifying|Extracting),\s*([\d.]+)%\s*complete/;
 
 function run(chdmanPath: string, args: string[], phase: string, options: RunOptions = {}): Promise<void> {
@@ -39,11 +44,31 @@ export function createChd(
   inputPath: string,
   outputPath: string,
   mode: "createcd" | "createdvd",
-  options?: RunOptions & { threads?: number },
+  options?: RunOptions & { threads?: number; estimatedOutputBytes?: number },
 ): Promise<void> {
   const args = [mode, "-i", inputPath, "-o", outputPath, "-f"];
   if (options?.threads) args.push("-np", String(options.threads));
-  return run(chdmanPath, args, "converting", options);
+
+  // chdman's own progress text doesn't reach us over a pipe (see above), so poll the growing
+  // output file's size against the caller's size estimate instead — this is what actually
+  // keeps the progress bar honest for what's usually the slowest step in the whole pipeline.
+  // Capped below 100 so a rough estimate can never falsely claim done before chdman exits.
+  let poller: NodeJS.Timeout | null = null;
+  if (options?.estimatedOutputBytes && options.estimatedOutputBytes > 0) {
+    const estimate = options.estimatedOutputBytes;
+    poller = setInterval(() => {
+      try {
+        const percent = Math.min(97, (statSync(outputPath).size / estimate) * 100);
+        options.onProgress?.(percent, "converting");
+      } catch {
+        // output file doesn't exist yet — nothing to report
+      }
+    }, 500);
+  }
+
+  return run(chdmanPath, args, "converting", options).finally(() => {
+    if (poller) clearInterval(poller);
+  });
 }
 
 export function verifyChd(chdmanPath: string, chdPath: string, options?: RunOptions): Promise<void> {

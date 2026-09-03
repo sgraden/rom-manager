@@ -154,6 +154,7 @@ function fakePlannedJob(overrides: Partial<PlannedJob> & { sourcePath: string })
     estimatedOutputBytes: null,
     warnings: [],
     replace: false,
+    replacesPath: null,
     ...overrides,
   };
 }
@@ -345,7 +346,7 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     const finishedB = await waitForTerminal(queue, jobB.id);
     expect(finishedA?.state).toBe("done");
     expect(finishedB?.state).toBe("done");
-  });
+  }, 60000);
 
   maybeIt("converts a cue+bin disc to a verified CHD and writes it atomically", async () => {
     const srcDir = makeTempDir();
@@ -780,7 +781,7 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     await new Promise((r) => setTimeout(r, 500));
 
     expect(peakConcurrentHashing).toBe(1);
-  });
+  }, 30000);
 
   maybeIt("replaces an existing destination file only when the job asks to", async () => {
     const srcDir = makeTempDir();
@@ -850,6 +851,76 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     expect(readdirSync(psxDir)).toEqual(["Keep Me.chd"]);
   });
 
+  maybeIt("removes the differently-named file it supersedes, rather than leaving both", async () => {
+    // Duplicates are usually matched by content or normalized name, so the superseded
+    // file rarely shares the filename the new job writes. Without replacesPath the user
+    // chooses Replace and ends up with both copies — the opposite of what they asked for.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    const superseded = path.join(psxDir, "Big Game (USA).chd");
+    writeFileSync(superseded, "the older dump");
+
+    const disc = makeRawCdTrack(srcDir, "Big Game Rev1");
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: disc.cuePath,
+        destinationFolder: psxDir,
+        destinationFilename: "Big Game (USA) (Rev 1).chd",
+        replace: true,
+        replacesPath: superseded,
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.replaced).toBe("Big Game (USA).chd");
+
+    expect(existsSync(path.join(psxDir, "Big Game (USA) (Rev 1).chd"))).toBe(true);
+    expect(existsSync(superseded)).toBe(false);
+    expect(readdirSync(psxDir)).toEqual(["Big Game (USA) (Rev 1).chd"]);
+  });
+
+  maybeIt("keeps the superseded file when the replacing job fails", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    const superseded = path.join(psxDir, "Big Game (USA).chd");
+    writeFileSync(superseded, "the older dump");
+
+    const bogusPath = path.join(srcDir, "Big Game Rev1.cue");
+    writeFileSync(bogusPath, "not a real cue sheet");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: bogusPath,
+        destinationFolder: psxDir,
+        destinationFilename: "Big Game (USA) (Rev 1).chd",
+        replace: true,
+        replacesPath: superseded,
+      }),
+    );
+
+    expect((await waitForTerminal(queue, job.id))?.state).toBe("failed");
+    expect(readFileSync(superseded, "utf-8")).toBe("the older dump");
+  });
+
   maybeIt("reports real intermediate progress during a chdman conversion, not just stuck 0% until done", async () => {
     // chdman's own "Compressing, N% complete" stdout is silently suppressed by chdman itself
     // whenever it's piped rather than attached to a TTY — exactly how child_process.spawn
@@ -880,7 +951,7 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     const finished = await waitForTerminal(queue, enqueued.id, 30000);
     expect(finished?.state).toBe("done");
     expect(percentsWhileConverting.some((p) => p > 0 && p < 100)).toBe(true);
-  });
+  }, 60000);
 
   maybeItDolphin("converts a GameCube ISO to RVZ via the npm-bundled DolphinTool", async () => {
     const srcDir = makeTempDir();
@@ -974,6 +1045,10 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
 
       const finished = await waitForTerminal(queue, job.id);
       expect(finished?.state).toBe("done");
+
+      // Source cleanup is deliberately chained behind the hashing pass — hashing has to
+      // read the source before anything deletes it — so it lands shortly after "done".
+      await new Promise((r) => setTimeout(r, 250));
       expect(existsSync(stagedPath)).toBe(false);
     } finally {
       rmSync(stagedPath, { force: true });

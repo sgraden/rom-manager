@@ -14,9 +14,11 @@ would have caught it, then add a `> **Status: done.**` line under its heading sa
 Items are ordered by impact within each section. Nothing here requires a rewrite — they are all
 local changes.
 
-**Progress.** Sections 1, 2 and 3 are complete, and §4's server side is done (index, matching,
-routes, and the safe replace-on-write path). Still to do: §4's UI (Review Status column and the
-Library tab) and §5 (design). Sections 1–3 — every correctness, efficiency and
+**Progress.** Sections 1–4 are complete: every correctness, efficiency and robustness item, plus
+the Library page and duplicate matching end to end (verified in a real browser against a scratch
+card). Of §5, the responsive pass (§5.2) and the evidence badge are done. **Still to do: §5.1
+(the structured error/remedy pass — the largest remaining item), §5.3 (progress legibility), and
+the rest of §5.4.** Sections 1–3 — every correctness, efficiency and
 robustness item listed below has landed, each with a test. Remaining: **§4** (Library page and
 duplicate matching) and **§5** (design work).
 
@@ -471,7 +473,19 @@ page. Run tier 1 only when the file is small (say under 256 MB) or when the user
 verdict — that is what makes the answer trustworthy.
 
 ### 4.3 Review page: the Replace / Skip decision
-> **Status: server side done.** The write path is in place: `replace` flows through `PlanOverride` → `PlannedJob` → `Job`, and the queue moves the existing file aside only after the conversion succeeds, deletes it only after the rename succeeds, and restores it if the rename fails. Two `queue.test.ts` cases, including one asserting a failed replace leaves the original untouched. **The Review UI itself is still to do.**
+> **Status: done.** A Status column sits second in the table (the decision is the point, so it
+> shouldn't be six columns over), with Skip preselected on every duplicate, the matching tier
+> spelled out, the size delta, and Skip-all/Replace-all above the table. Skipped rows stay
+> visible but dimmed and are excluded from the submission.
+>
+> The write path moves the existing file aside only after the conversion succeeds, deletes it
+> only after the rename succeeds, and restores it if the rename fails. **Verified in a real
+> browser against a scratch card**, which caught a bug the unit tests did not: `replace` only
+> swapped a file whose destination path was byte-identical, but every fuzzy tier matches a
+> *differently named* file — so choosing Replace left **both** copies on the card. Jobs now
+> carry `replacesPath`, derived server-side from the library index (never from the client,
+> since it names a file that gets deleted), and the superseded file is removed once the new one
+> is safely in place. Four `queue.test.ts` cases cover the swap and both failure paths.
 
 
 Add a **Status** column to the Review table. For a non-`none` verdict, the row renders:
@@ -498,6 +512,11 @@ whole point of this feature is a user re-adding a folder of thirty games and nee
 them in one gesture.
 
 ### 4.4 Library page: a fourth top-level tab
+> **Status: done.** A `library` tab outside the Drop → Review → Queue stepper: target selector
+> with rescan, totals header, a collapsible section per system folder, filename search, and
+> per-row Reveal/Delete. Delete names the file and its size in the confirmation. Unmapped
+> folders are flagged and sorted last. Verified in a browser, including that both path-traversal
+> attempts against `DELETE /api/library/entry` are refused.
 
 A new `library` tab in [web/src/App.tsx](web/src/App.tsx)'s `Tab` union, sitting outside the
 Drop → Review → Queue stepper (it is a reference view, not a step). It shows:
@@ -534,6 +553,21 @@ highest-value items. There is currently **no `@media` query anywhere in
 [web/src/styles.css](web/src/styles.css)**.
 
 ### 5.1 Errors should carry their own fix
+> **Status: done.** `web/src/AppError.ts` maps thrown errors to `{ message, remedy, cause }`,
+> stripping the API client's `<url> -> <status>:` prefix into `cause` where it belongs.
+> `ErrorPanel` renders the message, the remedy (with a copyable command where there is one and
+> an in-app action button), and the raw detail behind a "Technical details" disclosure. Every
+> page uses it — no raw error strings remain in the UI.
+>
+> Ten remedies are wired, covering each error in the table below plus a cue sheet whose track
+> files are missing. Failed **jobs** get the same treatment plus a working **Retry**
+> (`POST /api/jobs/:id/retry` re-plans from the original source, so the retry reflects the
+> card's current state rather than resurrecting a stale job).
+>
+> Because the patterns match on server-side message text — a loose coupling — `AppError.test.ts`
+> reads the real server sources and asserts the strings each pattern depends on are still there,
+> so rewording an error can't silently drop its remedy. Verified in a browser against a real
+> failed job.
 
 This is the single biggest UX gap. Every error in the app today is a raw string in a red
 paragraph, and the ones from the API are formatted by
@@ -575,6 +609,11 @@ a missing tool, the same install remedy. A failed conversion the user cannot ret
 re-dropping the file is the most frustrating state in the app.
 
 ### 5.2 The app is not responsive at all
+> **Status: done.** Every table is wrapped in an `overflow-x: auto` region, and below 900px the
+> Review and Queue tables become one card per row (filename as heading, `data-label` pairs
+> beneath). Long destinations now render as `folder/filename` with the full path as a tooltip —
+> the absolute prefix is identical on every row and was crowding out the columns that differ.
+> Verified at 375px: no horizontal body overflow.
 
 Both the Review table (7 columns, containing two `<select>`s and a path) and the Queue table
 overflow on any window narrower than roughly 1100 px, with no horizontal scroll container — the
@@ -590,6 +629,8 @@ page body scrolls sideways instead.
   or a JS middle-truncate) — the filename at the end is the informative part, not `/Volumes/…`.
 
 ### 5.3 Progress is honest but not legible
+> **Partly done.** A `hashing` phase is now emitted (§2.4), and the Queue reports what a replace
+> displaced. The aggregate queue bar, elapsed time and ETA are **still to do.**
 
 - The Queue progress bar is a bare `scaleX` track with the percentage in small muted text. Show
   the phase (`converting`, `verifying`, `hashing`) as a first-class label, and add an elapsed
@@ -603,8 +644,9 @@ page body scrolls sideways instead.
 
 ### 5.4 Smaller items, roughly in value order
 
-- **Destructive actions need confirmation.** Library delete and Review "Replace" both destroy
-  data. Name the file in the confirmation; do not use a bare `window.confirm`.
+- **Destructive actions need confirmation.** Library delete names the file and its size in the
+  confirmation, but still uses `window.confirm` — replace it with an in-app dialog. Review's
+  "Replace" is still unconfirmed at the point of clicking Process.
 - **`aria-live="polite"` on error and status regions**, so a screen reader announces a failure
   that appears without a navigation. Currently nothing is announced.
 - **Drag-and-drop flicker.** `DropPage`'s `onDragLeave` fires when the pointer crosses a child
@@ -618,10 +660,9 @@ page body scrolls sideways instead.
   `info` / `warning` / `blocker`, colour accordingly, and sort blockers first.
 - **Keyboard support on the file picker.** `.file-picker-button` is a `<label>` wrapping a
   hidden `<input type="file">` — it is not reachable by Tab and has no focus ring.
-- **Show the detection evidence on demand, not always.** The Review table prints the full
-  evidence string under every System dropdown, which is the widest column's worth of text for
-  something the user reads once. Collapse to a confidence badge with the evidence in a tooltip
-  or expander.
+- ~~**Show the detection evidence on demand, not always.**~~ **Done** — now a confidence badge
+  with the evidence as its tooltip, tinted when the match is low-confidence. This is what bought
+  back the width the Status column needed.
 - **Persist the selected target.** `DropPage` defaults to `targets[0]` on every load; someone
   with two volumes mounted re-picks every time. Store the last used target in config.
 

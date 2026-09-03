@@ -437,3 +437,343 @@ input[type="text"] {
   border-color: var(--border);
   color: inherit;
 }
+
+/* --------------------------------------------------------------------------
+   Library page and duplicate handling
+   -------------------------------------------------------------------------- */
+
+.header-links {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.library-summary {
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.library-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+}
+
+.library-group > summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.badge-warn {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.button-danger {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, var(--border));
+}
+
+.duplicate-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+}
+
+.duplicate-headline {
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.duplicate-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* The chosen option reads as pressed, so the decision is visible at a glance
+   when scanning a table of many rows. */
+.toggle-active {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #241a00;
+  font-weight: 600;
+}
+
+.duplicate-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+
+/* A skipped row stays visible rather than disappearing — the user should be able
+   to see what is being left out, and change their mind. */
+.plan-row-skipped td {
+  opacity: 0.55;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive: wide content scrolls inside its own region, never the page body
+   -------------------------------------------------------------------------- */
+
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+@media (max-width: 900px) {
+  .app-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Below this width the Review and Queue tables can't stay legible as grids, so
+     each row becomes a card: the filename is the heading, and every other column
+     is a labelled line beneath it. Labels come from each th via data-label. */
+  .review-page table,
+  .queue-page table,
+  .review-page thead,
+  .queue-page thead,
+  .review-page tbody,
+  .queue-page tbody,
+  .review-page tr,
+  .queue-page tr,
+  .review-page td,
+  .queue-page td {
+    display: block;
+  }
+
+  .review-page thead,
+  .queue-page thead {
+    display: none;
+  }
+
+  .review-page tbody tr,
+  .queue-page tbody tr {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  .review-page tbody td,
+  .queue-page tbody td {
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 4px 0;
+    border: none;
+  }
+
+  .review-page tbody td::before,
+  .queue-page tbody td::before {
+    content: attr(data-label);
+    flex: 0 0 40%;
+    font-weight: 600;
+    color: color-mix(in srgb, currentColor 65%, transparent);
+  }
+
+  .review-page tbody td:first-child,
+  .queue-page tbody td:first-child {
+    font-weight: 600;
+    padding-bottom: 8px;
+  }
+
+  .review-page tbody td:first-child::before,
+  .queue-page tbody td:first-child::before {
+    content: none;
+  }
+}
+
+/* Long destination paths truncate from the left — the filename at the end is the
+   informative part, not the /Volumes/... prefix. */
+.path-ellipsis {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* rtl puts the ellipsis at the start so the filename survives; plaintext keeps the
+     string itself laid out left-to-right, without which the leading "/" is reordered
+     to the end and reads as a trailing slash. */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
+}
+
+/* --------------------------------------------------------------------------
+   Review table column sizing
+   --------------------------------------------------------------------------
+   The Review row carries a lot: two dropdowns, a full destination path, a
+   duplicate decision and a warnings list. Without explicit sizing the browser
+   squeezes the filename column until it wraps one character per line, which is
+   unreadable. These give each column a floor and let the table scroll inside
+   .table-scroll instead of collapsing. */
+
+.review-page table {
+  min-width: 1040px;
+}
+
+.review-page th:nth-child(1),
+.review-page td:nth-child(1),
+.queue-page th:nth-child(1),
+.queue-page td:nth-child(1) {
+  min-width: 200px;
+  /* Break long filenames on word boundaries, not mid-character. */
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+/* The Queue's Status column carries the error panel, which needs room to be readable. */
+.queue-page table {
+  min-width: 900px;
+}
+
+.queue-page td .error-panel {
+  margin: 6px 0 0;
+  min-width: 260px;
+}
+
+/* Destination (6th) is capped; size (7th) never wraps. */
+.review-page th:nth-child(6),
+.review-page td:nth-child(6) {
+  max-width: 200px;
+}
+
+.review-page th:nth-child(7),
+.review-page td:nth-child(7) {
+  white-space: nowrap;
+}
+
+/* Inside the stacked card layout the widths and the min-width would fight the
+   single-column stacking, so they're released. */
+@media (max-width: 900px) {
+  .review-page table,
+  .queue-page table {
+    min-width: 0;
+  }
+
+  .review-page td:nth-child(6) {
+    max-width: none;
+  }
+
+  .path-ellipsis {
+    direction: ltr;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Detection evidence is long, and read once if ever — a badge carries the number
+   that matters, with the full reasoning in the tooltip. */
+.confidence-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: var(--bg-subtle);
+  cursor: help;
+}
+
+.confidence-low {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
+/* --------------------------------------------------------------------------
+   Actionable errors
+   -------------------------------------------------------------------------- */
+
+.error-panel {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+
+.error-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.error-dismiss {
+  flex: none;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.error-remedy {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.error-remedy p {
+  margin: 0;
+}
+
+.error-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.error-command code {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  user-select: all;
+}
+
+.error-cause {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.error-cause summary {
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.error-cause code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

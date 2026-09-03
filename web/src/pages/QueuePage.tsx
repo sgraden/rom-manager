@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
-import { subscribeJobEvents, cancelJob, clearCompletedJobs, type JobInfo } from "../api";
+import { subscribeJobEvents, cancelJob, clearCompletedJobs, retryJob, type JobInfo } from "../api";
+import { ErrorPanel } from "../ErrorPanel";
+import { toAppError } from "../AppError";
 import { ActionBar } from "../ActionBar";
+
+/** "folder/filename" — the absolute prefix is the same for every row and just crowds the table. */
+function shortDestination(folder: string, filename: string): string {
+  return `${folder.split("/").filter(Boolean).pop() ?? folder}/${filename}`;
+}
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "—";
@@ -30,15 +37,17 @@ function SizeCell({ job }: { job: JobInfo }) {
   );
 }
 
-function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => void }) {
+function JobRow({ job, onCancel, onRetry }: { job: JobInfo; onCancel: (id: string) => void; onRetry: (id: string) => void }) {
   return (
     <tr className={job.state === "failed" ? "row-error" : ""}>
-      <td className="mono">{job.sourceName}</td>
-      <td>{job.action}</td>
-      <td className="mono">
-        {job.destinationFolder}/{job.destinationFilename}
+      <td data-label="File" className="mono">{job.sourceName}</td>
+      <td data-label="Action">{job.action}</td>
+      <td data-label="Destination" className="mono">
+        <span title={`${job.destinationFolder}/${job.destinationFilename}`}>
+          {shortDestination(job.destinationFolder, job.destinationFilename)}
+        </span>
       </td>
-      <td>
+      <td data-label="Status">
         <div className="job-state">
           <span>{STATE_LABEL[job.state]}</span>
           {job.state === "running" && <span className="muted"> — {job.phase} {Math.round(job.percent)}%</span>}
@@ -51,15 +60,31 @@ function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => voi
             />
           </div>
         )}
-        {job.error && <div className="warning-line">⚠ {job.error}</div>}
+        {job.error && (
+          <ErrorPanel
+            error={toAppError(new Error(job.error))}
+            onAction={(kind) => {
+              // Every remedy offered on a failed job comes down to trying it again once
+              // the underlying cause is dealt with; navigation remedies aren't reachable
+              // from a row, so retry is the only action wired here.
+              if (kind === "retry" || kind === "recheck-tools") onRetry(job.id);
+            }}
+          />
+        )}
         {job.m3uWritten && <div className="muted">Playlist written: {job.m3uWritten}</div>}
         {job.datMatch && <div className="muted">DAT match: {job.datMatch}</div>}
+        {job.replaced && <div className="muted">Replaced the previous {job.replaced}</div>}
       </td>
-      <td>
+      <td data-label="Size">
         <SizeCell job={job} />
       </td>
-      <td>
+      <td data-label="">
         {(job.state === "queued" || job.state === "running") && <button onClick={() => onCancel(job.id)}>Cancel</button>}
+        {(job.state === "failed" || job.state === "cancelled") && (
+          <button type="button" onClick={() => onRetry(job.id)}>
+            Retry
+          </button>
+        )}
       </td>
     </tr>
   );
@@ -68,6 +93,7 @@ function JobRow({ job, onCancel }: { job: JobInfo; onCancel: (id: string) => voi
 export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
   const [jobs, setJobs] = useState<Map<string, JobInfo>>(new Map());
   const [order, setOrder] = useState<string[]>([]);
+  const [retryError, setRetryError] = useState<ReturnType<typeof toAppError> | null>(null);
 
   useEffect(() => {
     const unsubscribe = subscribeJobEvents((event) => {
@@ -92,6 +118,15 @@ export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
       await cancelJob(id);
     } catch {
       // the job row will reflect the real state on the next SSE update regardless
+    }
+  }
+
+  async function handleRetry(id: string) {
+    setRetryError(null);
+    try {
+      await retryJob(id);
+    } catch (e) {
+      setRetryError(toAppError(e));
     }
   }
 
@@ -138,6 +173,8 @@ export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
 
   return (
     <div className="queue-page">
+      {retryError && <ErrorPanel error={retryError} onDismiss={() => setRetryError(null)} />}
+      <div className="table-scroll">
       <table>
         <thead>
           <tr>
@@ -151,10 +188,11 @@ export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
         </thead>
         <tbody>
           {jobList.map((job) => (
-            <JobRow key={job.id} job={job} onCancel={handleCancel} />
+            <JobRow key={job.id} job={job} onCancel={handleCancel} onRetry={handleRetry} />
           ))}
         </tbody>
       </table>
+      </div>
 
       <ActionBar
         status={

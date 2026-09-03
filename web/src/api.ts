@@ -41,6 +41,8 @@ export interface DetectionCandidate {
 export interface PlanOverride {
   systemId?: string;
   action?: ConvertAction;
+  /** Overwrite whatever is already at the destination. Off unless the user chose it. */
+  replace?: boolean;
 }
 
 export interface PlannedJob {
@@ -55,6 +57,7 @@ export interface PlannedJob {
   destinationFilename: string | null;
   estimatedOutputBytes: number | null;
   warnings: string[];
+  replace: boolean;
 }
 
 export interface FolderMapResult {
@@ -189,6 +192,8 @@ export interface JobInfo {
   finishedAt: string | null;
   m3uWritten: string | null;
   datMatch: string | null;
+  replace: boolean;
+  replaced: string | null;
 }
 
 export interface SubmitJobsResult {
@@ -205,6 +210,11 @@ export function submitJobs(sourcePaths: string[], targetName: string, overrides?
 
 export function cancelJob(id: string): Promise<{ ok: true }> {
   return postJson(`/api/jobs/${encodeURIComponent(id)}/cancel`, {});
+}
+
+/** Re-runs a failed or cancelled job, re-planning it against the card's current state. */
+export function retryJob(id: string): Promise<{ job: JobInfo }> {
+  return postJson(`/api/jobs/${encodeURIComponent(id)}/retry`, {});
 }
 
 /** Drops finished jobs from the Queue list. The durable record stays in data/library.jsonl. */
@@ -243,4 +253,92 @@ export function subscribeJobEvents(onEvent: (event: JobEvent) => void): () => vo
     }
   };
   return () => source.close();
+}
+
+// ---------------------------------------------------------------------------
+// Library — what's already on the destination, and what would collide with it
+// ---------------------------------------------------------------------------
+
+export interface LibraryRecord {
+  timestamp: string;
+  originalName: string;
+  hashes: { crc32: string; md5: string; sha1: string };
+  hashedName: string;
+  system: string;
+  action: string;
+  destination: string;
+  sizeBefore: number;
+  sizeAfter: number;
+  datMatch: string | null;
+}
+
+export interface LibraryEntry {
+  folder: string;
+  filename: string;
+  fullPath: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  systemId: string | null;
+  record: LibraryRecord | null;
+}
+
+export interface LibrarySystemGroup {
+  systemId: string | null;
+  folder: string;
+  entries: LibraryEntry[];
+  totalBytes: number;
+}
+
+export interface LibraryIndex {
+  targetName: string;
+  romRoot: string;
+  groups: LibrarySystemGroup[];
+  fileCount: number;
+  totalBytes: number;
+  freeBytes: number | null;
+}
+
+/** How a duplicate was identified — shown to the user, since it's what makes the verdict trustworthy. */
+export type MatchTier = "exact" | "likely" | "name";
+
+export interface DuplicateMatch {
+  tier: MatchTier;
+  reason: string;
+  entry: LibraryEntry;
+}
+
+export interface DuplicateMatchResult {
+  sourcePath: string;
+  match: DuplicateMatch | null;
+}
+
+export function fetchLibrary(targetName: string): Promise<LibraryIndex> {
+  return getJson(`/api/library?target=${encodeURIComponent(targetName)}`);
+}
+
+export function fetchDuplicateMatches(
+  sourcePaths: string[],
+  targetName: string,
+  overrides?: Record<string, PlanOverride>,
+): Promise<{ matches: DuplicateMatchResult[] }> {
+  return postJson("/api/library/matches", { sourcePaths, target: targetName, overrides });
+}
+
+async function sendDelete<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${url} -> ${res.status}: ${await safeErrorText(res)}`);
+  return res.json() as Promise<T>;
+}
+
+/** Permanently removes one file from the destination. */
+export function deleteLibraryEntry(targetName: string, folder: string, filename: string): Promise<{ ok: true; deleted: string }> {
+  return sendDelete("/api/library/entry", { target: targetName, folder, filename });
+}
+
+export function revealLibraryEntry(targetName: string, folder: string, filename: string): Promise<{ ok: true }> {
+  return postJson("/api/library/reveal", { target: targetName, folder, filename });
 }

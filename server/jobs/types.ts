@@ -14,6 +14,8 @@ export interface Job {
   destinationPath: string;
   /** The user explicitly chose to overwrite an existing file at this destination. */
   replace: boolean;
+  /** A differently-named file on the card that this job supersedes, removed once the new one is safely written. */
+  replacesPath: string | null;
   /** Set when a replace job actually displaced a file, for the Queue page to report. */
   replaced: string | null;
   state: JobState;

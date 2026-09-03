@@ -187,6 +187,7 @@ export class JobQueue extends EventEmitter {
       destinationFilename: planned.destinationFilename,
       destinationPath,
       replace: planned.replace,
+      replacesPath: planned.replacesPath,
       replaced: null,
       state: "queued",
       percent: 0,
@@ -571,6 +572,23 @@ export class JobQueue extends EventEmitter {
         } catch {
           // The new file is in place, which is what matters; a leftover .replaced- file
           // is cosmetic, and deleting it is not worth failing a successful job over.
+        }
+      }
+
+      // A duplicate is usually matched by content or by a normalized name, so the file
+      // being superseded rarely has the same filename this job writes — "Game (USA).chd"
+      // vs "Game (USA) (Rev 1).chd". Without this the user chooses Replace and ends up
+      // with both copies on the card, which is the opposite of what they asked for.
+      // Removed only after the new file is safely in place, and only for a path the
+      // server itself derived from the library index (never one supplied by the client).
+      if (job.replacesPath && job.replacesPath !== job.destinationPath && existsSync(job.replacesPath)) {
+        try {
+          unlinkSync(job.replacesPath);
+          job.replaced = path.basename(job.replacesPath);
+        } catch (err) {
+          // The new file is written; failing to remove the old one is worth telling the
+          // user about, but not worth failing the job over.
+          console.error(`Couldn't remove the replaced file ${job.replacesPath}:`, err instanceof Error ? err.message : err);
         }
       }
       job.resultBytes = statSync(job.destinationPath).size;

@@ -15,6 +15,9 @@ import {
   type PerformanceConfig,
 } from "../api";
 
+import { ErrorPanel } from "../ErrorPanel";
+import { toAppError, type AppError } from "../AppError";
+
 const CREATE_FOLDER_SENTINEL = "__create__";
 
 function formatBytes(bytes: number | null): string {
@@ -27,13 +30,13 @@ function formatBytes(bytes: number | null): string {
 
 function FolderMapEditor({ target, systems }: { target: TargetInfo; systems: SystemDef[] }) {
   const [result, setResult] = useState<FolderMapResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
 
   useEffect(() => {
     setResult(null);
     fetchFolderMap(target.name)
       .then(setResult)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(toAppError(e)));
   }, [target.name]);
 
   async function handleChange(systemId: string, value: string, defaultFolderName: string) {
@@ -45,11 +48,11 @@ function FolderMapEditor({ target, systems }: { target: TargetInfo; systems: Sys
           : await setFolderMapEntry(target.name, systemId, value || null);
       setResult(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     }
   }
 
-  if (error) return <p className="error">{error}</p>;
+  if (error) return <ErrorPanel error={error} onDismiss={() => setError(null)} />;
   if (!result) return <p className="muted">Loading folder map…</p>;
 
   const sortedSystems = [...systems].sort((a, b) => a.name.localeCompare(b.name));
@@ -99,12 +102,12 @@ function FolderMapEditor({ target, systems }: { target: TargetInfo; systems: Sys
 function PerformanceSettings() {
   const [config, setConfig] = useState<PerformanceConfig | null>(null);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
 
   useEffect(() => {
     fetchPerformanceConfig()
       .then(setConfig)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(toAppError(e)));
   }, []);
 
   async function handleChange(patch: Partial<Omit<PerformanceConfig, "cpuCoreCount">>) {
@@ -113,13 +116,13 @@ function PerformanceSettings() {
     try {
       setConfig(await setPerformanceConfig(patch));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setSaving(false);
     }
   }
 
-  if (error) return <p className="error">{error}</p>;
+  if (error) return <ErrorPanel error={error} onDismiss={() => setError(null)} />;
   if (!config) return <p className="muted">Loading…</p>;
 
   const threadsPerJob = Math.max(1, Math.floor(Math.max(1, config.cpuCoreCount - config.reservedCpuCores) / Math.max(1, config.maxConcurrentJobs)));
@@ -165,7 +168,7 @@ export function SettingsPage() {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [systems, setSystems] = useState<SystemDef[] | null>(null);
   const [folderMapTarget, setFolderMapTarget] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
   const [loading, setLoading] = useState(true);
 
   /**
@@ -183,7 +186,7 @@ export function SettingsPage() {
       setSystems(systemsRes.systems);
       if (targetsRes.targets.length > 0 && !folderMapTarget) setFolderMapTarget(targetsRes.targets[0].name);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setLoading(false);
     }
@@ -208,7 +211,7 @@ export function SettingsPage() {
             {loading ? "Checking…" : "Re-check"}
           </button>
         </div>
-        {error && <p className="error">Failed to load: {error}</p>}
+        {error && <ErrorPanel error={error} onDismiss={() => setError(null)} onAction={(kind) => kind === "retry" && refresh(true)} />}
         {tools && (
           <table>
             <thead>

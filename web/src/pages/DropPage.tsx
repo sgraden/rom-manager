@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { fetchTargets, ingestPath, uploadFile, browseNative, planJobs, type TargetInfo, type PlannedJob } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
+import { ErrorPanel } from "../ErrorPanel";
+import { toAppError, type AppError, type RemedyKind } from "../AppError";
 import { Spinner } from "../Spinner";
 import { ActionBar } from "../ActionBar";
 
@@ -19,12 +21,18 @@ function formatBytes(bytes: number): string {
   return `${mb.toFixed(1)} MB`;
 }
 
-export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: PlannedJob[]) => void }) {
+export function DropPage({
+  onPlanned,
+  onRemedy,
+}: {
+  onPlanned: (targetName: string, jobs: PlannedJob[]) => void;
+  onRemedy: (kind: RemedyKind) => void;
+}) {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [targetName, setTargetName] = useState<string>("");
   const [sources, setSources] = useState<QueuedSource[]>([]);
   const [pathInput, setPathInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
   const [planning, setPlanning] = useState(false);
   const slowPlanning = useSlowFlag(planning);
   const [dragActive, setDragActive] = useState(false);
@@ -36,7 +44,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
         setTargets(r.targets);
         if (r.targets.length > 0) setTargetName(r.targets[0].name);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(toAppError(e)));
   }, []);
 
   function addIngested(file: { path: string; name: string; size: number }) {
@@ -54,7 +62,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
       addIngested(file);
       setPathInput("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     }
   }
 
@@ -69,7 +77,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
         prev.map((s) => (s.key === key ? { key: result.path, path: result.path, name: result.name, size: result.size, status: "ready" } : s)),
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
       setSources((prev) => prev.filter((s) => s.key !== key));
     }
   }
@@ -94,7 +102,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
       const { files } = await browseNative();
       for (const file of files) addIngested(file);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setBrowsing(false);
     }
@@ -109,7 +117,7 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
       const { jobs } = await planJobs(readyPaths, targetName);
       onPlanned(targetName, jobs);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setPlanning(false);
     }
@@ -119,7 +127,22 @@ export function DropPage({ onPlanned }: { onPlanned: (targetName: string, jobs: 
 
   return (
     <div className="drop-page">
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <ErrorPanel
+          error={error}
+          onDismiss={() => setError(null)}
+          onAction={(kind) => {
+            // "Retry" here means re-running whatever the user was last doing, which on
+            // this page is always building the plan.
+            if (kind === "retry") {
+              setError(null);
+              void handleBuildPlan();
+            } else {
+              onRemedy(kind);
+            }
+          }}
+        />
+      )}
 
       <section>
         <label className="field-label" htmlFor="target-select">

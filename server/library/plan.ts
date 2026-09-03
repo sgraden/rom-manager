@@ -73,6 +73,13 @@ export interface PlannedJob {
   warnings: string[];
   /** True when the user explicitly chose to overwrite an existing destination file. */
   replace: boolean;
+  /**
+   * The file on the card this job is replacing, when the user chose Replace and the
+   * match has a different filename to what this job will write. Always derived
+   * server-side from the library index — never accepted from the client, since it
+   * names a file that will be deleted.
+   */
+  replacesPath: string | null;
 }
 
 export function buildPlan(
@@ -197,5 +204,6 @@ function buildOne(
     estimatedOutputBytes,
     warnings,
     replace: override?.replace ?? false,
+    replacesPath: null,
   };
 }

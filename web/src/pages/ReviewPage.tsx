@@ -4,12 +4,16 @@ import {
   planJobs,
   submitJobs,
   createFolder,
+  fetchDuplicateMatches,
   type SystemDef,
   type PlannedJob,
   type ConvertAction,
   type PlanOverride,
+  type DuplicateMatch,
 } from "../api";
 import { useSlowFlag } from "../useSlowFlag";
+import { ErrorPanel } from "../ErrorPanel";
+import { toAppError, type AppError, type RemedyKind } from "../AppError";
 import { Spinner } from "../Spinner";
 import { ActionBar } from "../ActionBar";
 
@@ -28,6 +32,74 @@ function formatBytes(bytes: number | null): string {
   const mb = bytes / 1024 ** 2;
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb.toFixed(1)} MB`;
+}
+
+/**
+ * The destination shown as "folder/filename" rather than its full absolute path.
+ * The prefix is identical on every row and already stated in the banner above the
+ * table, so showing it in full only crowds out the columns that differ. The whole
+ * path stays available as a tooltip.
+ */
+function shortDestination(folder: string, filename: string): string {
+  return `${folder.split("/").filter(Boolean).pop() ?? folder}/${filename}`;
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+/**
+ * How the duplicate was identified. Surfaced verbatim next to the choice, because
+ * "identical contents" and "similar filename" deserve very different confidence
+ * before someone overwrites a file.
+ */
+const TIER_LABEL: Record<DuplicateMatch["tier"], string> = {
+  exact: "identical contents",
+  likely: "same game (DAT match)",
+  name: "matching filename",
+};
+
+/**
+ * The already-on-card notice and its Skip/Replace choice. Skip is the default for
+ * every duplicate — the safe option is the one that happens if the user does nothing.
+ */
+function DuplicateCell({
+  match,
+  decision,
+  estimatedOutputBytes,
+  onDecide,
+}: {
+  match: DuplicateMatch;
+  decision: "skip" | "replace";
+  estimatedOutputBytes: number | null;
+  onDecide: (decision: "skip" | "replace") => void;
+}) {
+  const existingBytes = match.entry.sizeBytes;
+  const delta = estimatedOutputBytes !== null ? existingBytes - estimatedOutputBytes : null;
+
+  return (
+    <div className="duplicate-cell">
+      <div className="duplicate-headline">⟳ Already on card</div>
+      <div className="muted">
+        {match.entry.filename} · {formatBytes(existingBytes)} · added {formatDate(match.entry.modifiedAt)}
+      </div>
+      <div className="muted">matched by: {TIER_LABEL[match.tier]}</div>
+      {delta !== null && delta !== 0 && (
+        <div className="muted">
+          replacing {formatBytes(existingBytes)} with ~{formatBytes(estimatedOutputBytes)} (
+          {delta > 0 ? `frees ${formatBytes(delta)}` : `uses ${formatBytes(-delta)} more`})
+        </div>
+      )}
+      <div className="duplicate-actions">
+        <button type="button" className={decision === "skip" ? "toggle-active" : ""} onClick={() => onDecide("skip")}>
+          Skip
+        </button>
+        <button type="button" className={decision === "replace" ? "toggle-active" : ""} onClick={() => onDecide("replace")}>
+          Replace
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function CreateFolderButton({ system, onCreate }: { system: SystemDef | undefined; onCreate: (name: string) => Promise<void> }) {
@@ -61,10 +133,12 @@ export function ReviewPage({
   targetName,
   initialJobs,
   onProcessed,
+  onRemedy,
 }: {
   targetName: string;
   initialJobs: PlannedJob[];
   onProcessed: () => void;
+  onRemedy: (kind: RemedyKind) => void;
 }) {
   const [systems, setSystems] = useState<SystemDef[] | null>(null);
   const [jobs, setJobs] = useState<PlannedJob[]>(initialJobs);
@@ -73,17 +147,68 @@ export function ReviewPage({
   const slowBusy = useSlowFlag(busy);
   const [processing, setProcessing] = useState(false);
   const slowProcessing = useSlowFlag(processing);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
+  const [matches, setMatches] = useState<Record<string, DuplicateMatch | null>>({});
+  /** Skip is the default for every duplicate — the safe choice is the one that needs no click. */
+  const [decisions, setDecisions] = useState<Record<string, "skip" | "replace">>({});
 
   useEffect(() => {
     setJobs(initialJobs);
     setOverrides({});
+    setMatches({});
+    setDecisions({});
   }, [initialJobs]);
+
+  /**
+   * Checks what's already on the card. Runs alongside the plan rather than blocking
+   * it — a duplicate is worth knowing about, but not worth delaying the whole table
+   * for, and a failure here should leave the plan perfectly usable.
+   */
+  useEffect(() => {
+    const sourcePaths = jobs.map((j) => j.sourcePath);
+    if (sourcePaths.length === 0 || !targetName) return;
+
+    let cancelled = false;
+    fetchDuplicateMatches(sourcePaths, targetName, overrides)
+      .then(({ matches: results }) => {
+        if (cancelled) return;
+        const next: Record<string, DuplicateMatch | null> = {};
+        for (const result of results) next[result.sourcePath] = result.match;
+        setMatches(next);
+        setDecisions((prev) => {
+          const merged = { ...prev };
+          for (const result of results) {
+            if (result.match && !merged[result.sourcePath]) merged[result.sourcePath] = "skip";
+            if (!result.match) delete merged[result.sourcePath];
+          }
+          return merged;
+        });
+      })
+      .catch(() => {
+        // Non-fatal: the plan is still correct, the user just doesn't get the warning.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobs, targetName]);
+
+  function decideDuplicate(sourcePath: string, decision: "skip" | "replace") {
+    setDecisions((prev) => ({ ...prev, [sourcePath]: decision }));
+  }
+
+  function decideAll(decision: "skip" | "replace") {
+    setDecisions((prev) => {
+      const next = { ...prev };
+      for (const job of jobs) if (matches[job.sourcePath]) next[job.sourcePath] = decision;
+      return next;
+    });
+  }
 
   useEffect(() => {
     fetchSystems()
       .then((r) => setSystems(r.systems))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(toAppError(e)));
   }, []);
 
   /**
@@ -101,7 +226,7 @@ export function ReviewPage({
       const bySourcePath = new Map(replanned.map((j) => [j.sourcePath, j] as const));
       setJobs((prev) => prev.map((job) => bySourcePath.get(job.sourcePath) ?? job));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setBusy(false);
     }
@@ -122,7 +247,7 @@ export function ReviewPage({
       const affected = jobs.filter((j) => j.selectedSystemId === systemId).map((j) => j.sourcePath);
       await replan(overrides, affected);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     }
   }
 
@@ -130,15 +255,41 @@ export function ReviewPage({
     setProcessing(true);
     setError(null);
     try {
-      const sourcePaths = jobs.map((j) => j.sourcePath);
-      const { results } = await submitJobs(sourcePaths, targetName, overrides);
+      // Skipped duplicates are simply not submitted, and a Replace decision travels
+      // with its source as an override so the server re-derives it the same way it
+      // re-derives everything else about the job.
+      const sourcePaths = jobs.filter((j) => decisions[j.sourcePath] !== "skip").map((j) => j.sourcePath);
+      if (sourcePaths.length === 0) {
+        setError({
+          message: "Every file is set to skip, so there's nothing to process.",
+          remedy: { text: "Choose Replace on at least one of the duplicates above, or go back and add different files." },
+        });
+        return;
+      }
+
+      const withReplace: Record<string, PlanOverride> = { ...overrides };
+      for (const sourcePath of sourcePaths) {
+        if (decisions[sourcePath] === "replace") {
+          withReplace[sourcePath] = { ...withReplace[sourcePath], replace: true };
+        }
+      }
+
+      const { results } = await submitJobs(sourcePaths, targetName, withReplace);
       const failures = results.filter((r): r is Extract<typeof r, { ok: false }> => !r.ok);
       if (failures.length > 0) {
-        setError(failures.map((f) => `${f.sourcePath}: ${f.error}`).join("; "));
+        // Surface the first failure with its remedy; the rest are listed as the cause,
+        // since they're usually the same problem repeated across files.
+        const primary = toAppError(new Error(failures[0].error));
+        setError({
+          ...primary,
+          message: failures.length === 1 ? primary.message : `${primary.message} (${failures.length} files affected)`,
+          cause: failures.map((f) => `${f.sourcePath}: ${f.error}`).join("\n"),
+        });
+        return;
       }
       onProcessed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toAppError(e));
     } finally {
       setProcessing(false);
     }
@@ -152,7 +303,10 @@ export function ReviewPage({
     );
   }
 
-  const readyCount = jobs.filter((j) => j.selectedSystemId && j.action && j.destinationFolder).length;
+  const plannable = jobs.filter((j) => j.selectedSystemId && j.action && j.destinationFolder);
+  const skippedCount = jobs.filter((j) => decisions[j.sourcePath] === "skip").length;
+  const readyCount = plannable.filter((j) => decisions[j.sourcePath] !== "skip").length;
+  const duplicateCount = jobs.filter((j) => matches[j.sourcePath]).length;
 
   return (
     <div className="review-page">
@@ -169,7 +323,33 @@ export function ReviewPage({
           ))}
         </ul>
       </details>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <ErrorPanel
+          error={error}
+          onDismiss={() => setError(null)}
+          onAction={(kind) => {
+            if (kind === "retry") {
+              setError(null);
+              void replan(overrides, jobs.map((j) => j.sourcePath));
+            } else {
+              onRemedy(kind);
+            }
+          }}
+        />
+      )}
+      {duplicateCount > 0 && (
+        <div className="duplicate-bulk">
+          <span>
+            {duplicateCount} of these {duplicateCount === 1 ? "is" : "are"} already on {targetName}.
+          </span>
+          <button type="button" onClick={() => decideAll("skip")}>
+            Skip all duplicates
+          </button>
+          <button type="button" onClick={() => decideAll("replace")}>
+            Replace all duplicates
+          </button>
+        </div>
+      )}
       {busy && (
         <p className="inline-status">
           <Spinner />
@@ -177,10 +357,12 @@ export function ReviewPage({
         </p>
       )}
 
+      <div className="table-scroll">
       <table>
         <thead>
           <tr>
             <th>File</th>
+            <th>Status</th>
             <th>Kind</th>
             <th>System</th>
             <th>Action</th>
@@ -191,10 +373,27 @@ export function ReviewPage({
         </thead>
         <tbody>
           {jobs.map((job) => (
-            <tr key={job.sourcePath} className={job.warnings.length > 0 ? "plan-row-warn" : ""}>
-              <td className="mono">{job.sourceName}</td>
-              <td>{job.sourceKind}</td>
-              <td>
+            <tr
+              key={job.sourcePath}
+              className={[decisions[job.sourcePath] === "skip" ? "plan-row-skipped" : "", job.warnings.length > 0 ? "plan-row-warn" : ""]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <td data-label="File" className="mono">{job.sourceName}</td>
+              <td data-label="Status">
+                {matches[job.sourcePath] ? (
+                  <DuplicateCell
+                    match={matches[job.sourcePath]!}
+                    decision={decisions[job.sourcePath] ?? "skip"}
+                    estimatedOutputBytes={job.estimatedOutputBytes}
+                    onDecide={(decision) => decideDuplicate(job.sourcePath, decision)}
+                  />
+                ) : (
+                  <span className="muted">New</span>
+                )}
+              </td>
+              <td data-label="Kind">{job.sourceKind}</td>
+              <td data-label="System">
                 <select
                   value={job.selectedSystemId ?? ""}
                   onChange={(e) => applyOverride(job.sourcePath, { systemId: e.target.value || undefined })}
@@ -207,12 +406,15 @@ export function ReviewPage({
                   ))}
                 </select>
                 {job.candidates.length > 0 && (
-                  <div className="evidence">
-                    {job.candidates[0].evidence} ({Math.round(job.candidates[0].confidence * 100)}%)
-                  </div>
+                  <span
+                    className={job.candidates[0].confidence >= 0.6 ? "confidence-badge" : "confidence-badge confidence-low"}
+                    title={job.candidates[0].evidence}
+                  >
+                    {Math.round(job.candidates[0].confidence * 100)}% confident
+                  </span>
                 )}
               </td>
-              <td>
+              <td data-label="Action">
                 <select
                   value={job.action ?? ""}
                   title={job.action ? ACTION_EXPLANATION[job.action] : undefined}
@@ -226,9 +428,11 @@ export function ReviewPage({
                   ))}
                 </select>
               </td>
-              <td className="mono">
+              <td data-label="Destination" className="mono">
                 {job.destinationFolder ? (
-                  `${job.destinationFolder}/${job.destinationFilename}`
+                  <span title={`${job.destinationFolder}/${job.destinationFilename}`}>
+                    {shortDestination(job.destinationFolder, job.destinationFilename ?? "")}
+                  </span>
                 ) : job.selectedSystemId && systems ? (
                   <CreateFolderButton
                     key={job.selectedSystemId}
@@ -239,10 +443,10 @@ export function ReviewPage({
                   <span className="muted">{job.selectedSystemId ? "Loading…" : "unmapped"}</span>
                 )}
               </td>
-              <td>
+              <td data-label="Size">
                 {formatBytes(job.sourceBytes)} → {formatBytes(job.estimatedOutputBytes)}
               </td>
-              <td>
+              <td data-label="Warnings">
                 {job.warnings.map((w, i) => (
                   <div key={i} className="warning-line">
                     ⚠ {w}
@@ -253,6 +457,7 @@ export function ReviewPage({
           ))}
         </tbody>
       </table>
+      </div>
 
       <ActionBar
         status={
@@ -263,7 +468,8 @@ export function ReviewPage({
             </span>
           ) : (
             <span className="muted">
-              {readyCount} of {jobs.length} file{jobs.length === 1 ? "" : "s"} ready to process.
+              {readyCount} of {jobs.length} file{jobs.length === 1 ? "" : "s"} ready to process
+              {skippedCount > 0 ? `, ${skippedCount} skipped as already on the card` : ""}.
             </span>
           )
         }

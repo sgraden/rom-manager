@@ -1,9 +1,13 @@
 import { Router } from "express";
+import path from "node:path";
+import { existsSync } from "node:fs";
 import { buildPlan, parsePlanOverrides } from "../library/plan.js";
 import { listTargets } from "../library/targets.js";
 import { loadConfig } from "../library/config.js";
 import { detectTools } from "../convert/tools.js";
 import { jobQueue } from "../jobs/queueInstance.js";
+import { buildLibraryIndex } from "../library/libraryIndex.js";
+import { findDuplicate } from "../library/duplicates.js";
 
 export const jobsRouter = Router();
 
@@ -86,6 +90,25 @@ jobsRouter.post("/", (req, res) => {
   const sevenZip = detectTools(config.toolPathOverrides).find((t) => t.id === "sevenZip");
   const planned = buildPlan(sourcePaths, target, config, { sevenZipPath: sevenZip?.found ? sevenZip.path : null }, parsed.overrides);
 
+  // A duplicate is usually matched by content or by a normalized name, so the file it
+  // supersedes typically has a different filename to the one this job will write. Resolve
+  // that here, server-side, so a Replace actually removes the old copy instead of leaving
+  // two on the card — and so the path to be deleted is one the server derived from its own
+  // index rather than anything the client named.
+  if (planned.some((job) => job.replace)) {
+    const index = buildLibraryIndex(target, config);
+    for (const job of planned) {
+      if (!job.replace || !job.destinationFilename) continue;
+      const match = findDuplicate(
+        { destinationFilename: job.destinationFilename, destinationFolder: job.destinationFolder },
+        index,
+      );
+      if (match && match.entry.fullPath !== path.join(job.destinationFolder ?? "", job.destinationFilename)) {
+        job.replacesPath = match.entry.fullPath;
+      }
+    }
+  }
+
   const results = planned.map((job) => {
     try {
       return { ok: true as const, job: jobQueue.enqueue(job) };
@@ -95,6 +118,52 @@ jobsRouter.post("/", (req, res) => {
   });
 
   res.json({ results });
+});
+
+/**
+ * Re-runs a failed or cancelled job. The plan is rebuilt from the original source path
+ * rather than the old job being resurrected, so the retry reflects the card's current
+ * state — the file that collided may since have been deleted, the missing tool
+ * installed, the folder mapped.
+ */
+jobsRouter.post("/:id/retry", (req, res) => {
+  const previous = jobQueue.get(req.params.id);
+  if (!previous) {
+    res.status(404).json({ error: "No such job." });
+    return;
+  }
+  if (previous.state !== "failed" && previous.state !== "cancelled") {
+    res.status(400).json({ error: "Only a failed or cancelled job can be retried." });
+    return;
+  }
+  if (!existsSync(previous.sourcePath)) {
+    res.status(400).json({ error: `The original file is no longer at ${previous.sourcePath} — add it again to retry.` });
+    return;
+  }
+
+  const config = loadConfig();
+  const target = listTargets(config.additionalTargetPaths).find((t) => previous.destinationFolder.startsWith(t.romRoot));
+  if (!target) {
+    res.status(400).json({ error: "The destination for that job isn't mounted any more." });
+    return;
+  }
+
+  const sevenZip = detectTools(config.toolPathOverrides).find((t) => t.id === "sevenZip");
+  const [planned] = buildPlan(
+    [previous.sourcePath],
+    target,
+    config,
+    { sevenZipPath: sevenZip?.found ? sevenZip.path : null },
+    // Keep the choices the user made the first time round.
+    { [previous.sourcePath]: { systemId: previous.selectedSystemId, action: previous.action, replace: previous.replace } },
+  );
+  planned.replacesPath = previous.replacesPath;
+
+  try {
+    res.json({ job: jobQueue.enqueue(planned) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 jobsRouter.post("/:id/cancel", (req, res) => {

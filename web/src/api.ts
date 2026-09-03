@@ -96,8 +96,9 @@ async function safeErrorText(res: Response): Promise<string> {
   }
 }
 
-export function fetchTools(): Promise<{ tools: ToolInfo[] }> {
-  return getJson("/api/tools");
+/** `refresh` re-runs the real tool probes instead of returning the server's memoized result. */
+export function fetchTools(refresh = false): Promise<{ tools: ToolInfo[] }> {
+  return getJson(refresh ? "/api/tools?refresh=1" : "/api/tools");
 }
 
 export function fetchTargets(): Promise<{ targets: TargetInfo[] }> {
@@ -204,6 +205,13 @@ export function submitJobs(sourcePaths: string[], targetName: string, overrides?
 
 export function cancelJob(id: string): Promise<{ ok: true }> {
   return postJson(`/api/jobs/${encodeURIComponent(id)}/cancel`, {});
+}
+
+/** Drops finished jobs from the Queue list. The durable record stays in data/library.jsonl. */
+export async function clearCompletedJobs(): Promise<{ removed: number }> {
+  const res = await fetch("/api/jobs/completed", { method: "DELETE" });
+  if (!res.ok) throw new Error(`/api/jobs/completed -> ${res.status}: ${await safeErrorText(res)}`);
+  return res.json() as Promise<{ removed: number }>;
 }
 
 export interface PerformanceConfig {

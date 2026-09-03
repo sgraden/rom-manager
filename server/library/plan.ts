@@ -10,6 +10,12 @@ import type { AppConfig } from "./config.js";
 export interface PlanOverride {
   systemId?: string;
   action?: ConvertAction;
+  /**
+   * Overwrite whatever is already at the destination. Off by default: a destination
+   * collision fails the job rather than silently replacing a file the user may not
+   * have realised was there.
+   */
+  replace?: boolean;
 }
 
 const VALID_ACTIONS = new Set<ConvertAction>(["chd-cd", "chd-dvd", "rvz", "keep-zip", "copy"]);
@@ -27,7 +33,7 @@ export function parsePlanOverrides(raw: unknown): { overrides: Record<string, Pl
 
   const overrides: Record<string, PlanOverride> = {};
   for (const [sourcePath, value] of Object.entries(raw as Record<string, unknown>)) {
-    const o = value as { systemId?: unknown; action?: unknown };
+    const o = value as { systemId?: unknown; action?: unknown; replace?: unknown };
     const entry: PlanOverride = {};
 
     if (o.systemId !== undefined) {
@@ -41,6 +47,12 @@ export function parsePlanOverrides(raw: unknown): { overrides: Record<string, Pl
         return { error: `Unknown action in overrides: ${String(o.action)}` };
       }
       entry.action = o.action as ConvertAction;
+    }
+    if (o.replace !== undefined) {
+      if (typeof o.replace !== "boolean") {
+        return { error: `replace must be a boolean, got ${String(o.replace)}` };
+      }
+      entry.replace = o.replace;
     }
     overrides[sourcePath] = entry;
   }
@@ -59,6 +71,8 @@ export interface PlannedJob {
   destinationFilename: string | null;
   estimatedOutputBytes: number | null;
   warnings: string[];
+  /** True when the user explicitly chose to overwrite an existing destination file. */
+  replace: boolean;
 }
 
 export function buildPlan(
@@ -154,7 +168,7 @@ function buildOne(
 
     if (destinationFolder) {
       const destPath = path.join(destinationFolder, sanitizeExfatName(destinationFilename));
-      if (existsSync(destPath)) {
+      if (existsSync(destPath) && !override?.replace) {
         warnings.push(`A file named "${destinationFilename}" already exists at the destination.`);
       }
     }
@@ -182,5 +196,6 @@ function buildOne(
     destinationFilename,
     estimatedOutputBytes,
     warnings,
+    replace: override?.replace ?? false,
   };
 }

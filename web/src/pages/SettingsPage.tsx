@@ -168,11 +168,16 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  async function refresh() {
+  /**
+   * `reprobeTools` forces the server to re-run the real tool probes rather than
+   * answering from its memoized result — which is the whole point of the Re-check
+   * button, since the reason to press it is that you just installed something.
+   */
+  async function refresh(reprobeTools = false) {
     setLoading(true);
     setError(null);
     try {
-      const [toolsRes, targetsRes, systemsRes] = await Promise.all([fetchTools(), fetchTargets(), fetchSystems()]);
+      const [toolsRes, targetsRes, systemsRes] = await Promise.all([fetchTools(reprobeTools), fetchTargets(), fetchSystems()]);
       setTools(toolsRes.tools);
       setTargets(targetsRes.targets);
       setSystems(systemsRes.systems);
@@ -199,7 +204,7 @@ export function SettingsPage() {
       <section>
         <div className="section-header">
           <h2>Conversion tools</h2>
-          <button onClick={refresh} disabled={loading}>
+          <button onClick={() => refresh(true)} disabled={loading}>
             {loading ? "Checking…" : "Re-check"}
           </button>
         </div>

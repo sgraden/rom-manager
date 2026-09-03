@@ -6,6 +6,12 @@ export interface LibraryRecord {
   timestamp: string;
   originalName: string;
   hashes: FileHashes;
+  /**
+   * What those hashes are of. Usually the source file itself, but for a single-entry
+   * archive it's the ROM inside it — which is what a DAT indexes, and so what makes
+   * the hashes comparable against one.
+   */
+  hashedName: string;
   system: string;
   action: string;
   destination: string;

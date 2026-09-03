@@ -12,6 +12,10 @@ export interface Job {
   destinationFolder: string;
   destinationFilename: string;
   destinationPath: string;
+  /** The user explicitly chose to overwrite an existing file at this destination. */
+  replace: boolean;
+  /** Set when a replace job actually displaced a file, for the Queue page to report. */
+  replaced: string | null;
   state: JobState;
   percent: number;
   phase: string;

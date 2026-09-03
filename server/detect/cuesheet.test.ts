@@ -55,6 +55,55 @@ describe("parseGdiFile", () => {
     expect(result.trackFiles.sort()).toEqual([track1, track2].sort());
     expect(result.missingTrackFiles).toEqual([]);
   });
+
+  it("resolves a quoted track filename containing spaces", () => {
+    const dir = makeTempDir();
+    const track = path.join(dir, "Game Disc 1 (Track 01).bin");
+    writeFileSync(track, "");
+    const gdiPath = path.join(dir, "Game.gdi");
+    const content = '1\n1 0 4 2352 "Game Disc 1 (Track 01).bin" 0\n';
+    writeFileSync(gdiPath, content);
+
+    expect(parseGdiFile(gdiPath, content).trackFiles).toEqual([track]);
+  });
+
+  it("takes the filename from its real position, not the first token that looks like one", () => {
+    // The old pattern grabbed the first token ending in .bin/.raw/.iso anywhere on the
+    // line, so a track filename that isn't the first such token was resolved wrongly.
+    const dir = makeTempDir();
+    const real = path.join(dir, "track02.bin");
+    writeFileSync(real, "");
+    const gdiPath = path.join(dir, "Game.gdi");
+    const content = "1\n2 45000 4 2352 track02.bin 0\n";
+    writeFileSync(gdiPath, content);
+
+    const result = parseGdiFile(gdiPath, content);
+    expect(result.trackFiles).toEqual([real]);
+  });
+
+  it("accepts a track line with no trailing offset", () => {
+    const dir = makeTempDir();
+    const track = path.join(dir, "track01.bin");
+    writeFileSync(track, "");
+    const gdiPath = path.join(dir, "Game.gdi");
+    const content = "1\n1 0 4 2352 track01.bin\n";
+    writeFileSync(gdiPath, content);
+
+    expect(parseGdiFile(gdiPath, content).trackFiles).toEqual([track]);
+  });
+
+  it("ignores lines that aren't track entries", () => {
+    const dir = makeTempDir();
+    const track = path.join(dir, "track01.bin");
+    writeFileSync(track, "");
+    const gdiPath = path.join(dir, "Game.gdi");
+    const content = '1\n# ripped with "some tool.exe"\n1 0 4 2352 track01.bin 0\n';
+    writeFileSync(gdiPath, content);
+
+    const result = parseGdiFile(gdiPath, content);
+    expect(result.trackFiles).toEqual([track]);
+    expect(result.missingTrackFiles).toEqual([]);
+  });
 });
 
 describe("resolveCcdCompanions", () => {

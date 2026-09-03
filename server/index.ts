@@ -12,6 +12,7 @@ import { planRouter } from "./routes/plan.js";
 import { systemsRouter } from "./routes/systems.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { configRouter } from "./routes/config.js";
+import { libraryRouter } from "./routes/library.js";
 import { datIndex } from "./jobs/queueInstance.js";
 import { sweepStaleStagingDirs } from "./library/staging.js";
 import { STAGING_DIR, WEB_DIST_DIR } from "./lib/paths.js";
@@ -37,6 +38,7 @@ app.use("/api/plan", planRouter);
 app.use("/api/systems", systemsRouter);
 app.use("/api/jobs", jobsRouter);
 app.use("/api/config", configRouter);
+app.use("/api/library", libraryRouter);
 
 // Anything under /api that no router above matched is a real 404, not a client-side
 // route. Without this it falls through to the SPA catch-all below and returns

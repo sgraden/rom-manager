@@ -20,8 +20,20 @@ interface MountEntry {
   fsType: string;
 }
 
+/**
+ * The mount table, re-read at most once every MOUNT_CACHE_MS. listTargets is called by
+ * /api/targets, /api/plan, POST /api/jobs and three /api/targets/:name routes (one of
+ * which calls it twice), each shelling out to `mount` — but volumes don't appear or
+ * disappear within a single request, so a short cache costs nothing in accuracy and
+ * takes a subprocess off most of those paths.
+ */
+const MOUNT_CACHE_MS = 3000;
+let mountCache: { at: number; entries: MountEntry[] } | null = null;
+
 /** Parses `mount` output, e.g. `/dev/disk4s1 on /Volumes/ROMSCARD (exfat, local, ...)`. */
 function getMounts(): MountEntry[] {
+  if (mountCache && Date.now() - mountCache.at < MOUNT_CACHE_MS) return mountCache.entries;
+
   const result = spawnSync("mount", [], { encoding: "utf-8", timeout: 5000 });
   if (result.error || !result.stdout) return [];
 
@@ -30,6 +42,7 @@ function getMounts(): MountEntry[] {
     const match = line.match(/^\S+\son\s(.+)\s\(([^,)]+)/);
     if (match) entries.push({ mountpoint: match[1], fsType: match[2] });
   }
+  mountCache = { at: Date.now(), entries };
   return entries;
 }
 

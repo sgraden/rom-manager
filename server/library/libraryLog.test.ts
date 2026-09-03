@@ -27,6 +27,7 @@ function makeRecord(overrides: Partial<LibraryRecord> = {}): LibraryRecord {
     timestamp: "2026-01-01T00:00:00.000Z",
     originalName: "game.nes",
     hashes: { crc32: "deadbeef", md5: "d41d8cd98f00b204e9800998ecf8427e", sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709" },
+    hashedName: "game.nes",
     system: "nes",
     action: "keep-zip" as const,
     destination: "/roms/nes/game.zip",

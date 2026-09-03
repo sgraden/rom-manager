@@ -32,7 +32,16 @@ export function parseCueFile(cuePath: string, content: string): DiscSet {
   return resolveTracks(cuePath, dir, trackFiles);
 }
 
-const GDI_TRACK_FILENAME = /"([^"]+)"|(\S+\.(?:bin|raw|iso))/i;
+/**
+ * A GDI track line: `trackNo startLBA trackType sectorSize filename offset`, e.g.
+ * `3 45000 4 2352 track03.bin 0`. The filename is quoted when it contains spaces.
+ * The trailing offset is optional — some real .gdi files omit it.
+ *
+ * Matched positionally rather than by hunting for the first quoted string or the
+ * first token ending in .bin/.raw/.iso, either of which picks up the wrong token on
+ * a line carrying any other quoted field.
+ */
+const GDI_TRACK_LINE = /^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(\S+))(?:\s+\d+)?\s*$/;
 
 export function parseGdiFile(gdiPath: string, content: string): DiscSet {
   const dir = path.dirname(gdiPath);
@@ -44,8 +53,9 @@ export function parseGdiFile(gdiPath: string, content: string): DiscSet {
   const trackFiles: string[] = [];
   // First line is the track count, not a track entry.
   for (const line of lines.slice(1)) {
-    const match = line.match(GDI_TRACK_FILENAME);
-    if (match) trackFiles.push(match[1] ?? match[2]);
+    const match = line.match(GDI_TRACK_LINE);
+    if (!match) continue; // comment, blank, or something that isn't a track entry
+    trackFiles.push(match[1] ?? match[2]);
   }
   return resolveTracks(gdiPath, dir, trackFiles);
 }

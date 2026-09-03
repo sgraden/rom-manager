@@ -153,6 +153,7 @@ function fakePlannedJob(overrides: Partial<PlannedJob> & { sourcePath: string })
     destinationFilename: null,
     estimatedOutputBytes: null,
     warnings: [],
+    replace: false,
     ...overrides,
   };
 }
@@ -191,7 +192,10 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-    const record = records.find((r: { originalName: string }) => r.originalName === "game.nes");
+    // Matched on destination, not just originalName: the log is shared across this
+    // file's tests and more than one of them processes a source called "game.nes",
+    // so a name-only lookup can pick up another test's record.
+    const record = records.find((r: { destination: string }) => r.destination === path.join(destDir, "nes", "game.zip"));
     expect(record).toBeDefined();
     // Ground truth computed independently in the same way as hash.test.ts.
     expect(record.hashes.crc32).toBe("9ed2bab3");
@@ -239,6 +243,60 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     // The file on disk keeps the name it was planned with — a DAT match is informational only, v1 never renames.
     expect(existsSync(path.join(destDir, "nes", "game.zip"))).toBe(true);
     expect(existsSync(path.join(destDir, "nes", "Real Game (USA) [!].nes"))).toBe(false);
+  });
+
+  maybeIt("matches a DAT for a zipped cartridge ROM by hashing the ROM, not the zip", async () => {
+    // A DAT indexes the ROM inside the archive. Hashing the .zip container produced
+    // hashes that could never match — and for cartridge systems the source is almost
+    // always a .zip, so DAT matching was useless exactly where it's most wanted.
+    const { loadDatIndex } = await import("../library/dat.js");
+    const srcDir = makeTempDir();
+
+    const romPath = path.join(srcDir, "Real Game (USA).nes");
+    const romBuf = Buffer.alloc(64);
+    romBuf.write("NES\x1a", 0, "latin1");
+    writeFileSync(romPath, romBuf);
+
+    // The same 64-byte ROM the suite's other DAT test uses, so the digests are known good.
+    const datsDir = makeTempDir();
+    writeFileSync(
+      path.join(datsDir, "nes.dat"),
+      `<datafile><game name="Real Game"><rom name="Real Game (USA) [!].nes" crc="9ed2bab3" md5="e4e449ab0c2479e7a99a0671c13c0ce6" sha1="36d39bfdabfcec6c8cd6c61fb0ee8f6b2f758669"/></game></datafile>`,
+    );
+    const datIndex = loadDatIndex(datsDir);
+
+    const archivePath = path.join(srcDir, "Real Game (USA).zip");
+    expect(spawnSync("7zz", ["a", "-tzip", archivePath, romPath], { encoding: "utf-8" }).status).toBe(0);
+
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const queue = new JobQueue(() => 1, () => false, () => toolPaths, () => false, () => 0, datIndex);
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: archivePath,
+        selectedSystemId: "nes",
+        action: "keep-zip",
+        destinationFolder: path.join(destDir, "nes"),
+        destinationFilename: "Real Game (USA).zip",
+      }),
+    );
+
+    await waitForTerminal(queue, job.id);
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(queue.get(job.id)?.datMatch).toBe("Real Game (USA) [!].nes");
+
+    const records = readFileSync(LIBRARY_LOG_PATH, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const record = records.find(
+      (r: { destination: string }) => r.destination === path.join(destDir, "nes", "Real Game (USA).zip"),
+    );
+    // The log says plainly what was hashed, so the hashes can't be misread later.
+    expect(record.hashedName).toBe("Real Game (USA).nes");
+    expect(record.hashes.sha1).toBe("36d39bfdabfcec6c8cd6c61fb0ee8f6b2f758669");
   });
 
   maybeIt("actually runs two jobs concurrently when maxConcurrentJobs is 2, not just sequentially", async () => {
@@ -608,6 +666,190 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     expect(readdirSync(path.join(destDir, "psx")).filter((n) => n.endsWith(".part"))).toEqual([]);
   });
 
+  maybeIt("writes a .m3u that includes discs already on the card from an earlier session", async () => {
+    // The playlist used to be built from this session's job list, which is empty after a
+    // restart — so adding Disc 2 later than Disc 1 produced no playlist at all.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    // Disc 1 is already sitting on the card; this process knows nothing about it.
+    writeFileSync(path.join(psxDir, "Big RPG (Disc 1).chd"), "written by an earlier session");
+
+    const disc2 = makeRawCdTrack(srcDir, "Big RPG Disc2");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: disc2.cuePath,
+        destinationFolder: psxDir,
+        destinationFilename: "Big RPG (Disc 2).chd",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+
+    const m3uPath = path.join(psxDir, "Big RPG.m3u");
+    expect(existsSync(m3uPath)).toBe(true);
+    expect(readFileSync(m3uPath, "utf-8").trim().split("\n")).toEqual(["Big RPG (Disc 1).chd", "Big RPG (Disc 2).chd"]);
+    expect(finished?.m3uWritten).toBe(m3uPath);
+  });
+
+  maybeIt("does not list the playlist itself, or dotfiles, among a set's discs", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    writeFileSync(path.join(psxDir, "Big RPG (Disc 1).chd"), "earlier session");
+    // A stale playlist and a macOS metadata file, both of which sit in the same folder.
+    writeFileSync(path.join(psxDir, "Big RPG.m3u"), "stale contents\n");
+    writeFileSync(path.join(psxDir, "._Big RPG (Disc 3).chd"), "resource fork");
+
+    const disc2 = makeRawCdTrack(srcDir, "Big RPG Disc2");
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({ sourcePath: disc2.cuePath, destinationFolder: psxDir, destinationFilename: "Big RPG (Disc 2).chd" }),
+    );
+    await waitForTerminal(queue, job.id);
+
+    const lines = readFileSync(path.join(psxDir, "Big RPG.m3u"), "utf-8").trim().split("\n");
+    expect(lines).toEqual(["Big RPG (Disc 1).chd", "Big RPG (Disc 2).chd"]);
+  });
+
+  maybeIt("hashes finished jobs one at a time rather than all at once", async () => {
+    // Hashing reads the whole source file. Several starting together would compete for
+    // the same disk as the conversions that just took their run slots.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "nes"));
+
+    const queue = new JobQueue(
+      () => 4,
+      () => false,
+      () => toolPaths,
+    );
+
+    let concurrentHashing = 0;
+    let peakConcurrentHashing = 0;
+    queue.on("update", (job: { phase: string; state: string }) => {
+      if (job.state !== "done") return;
+      if (job.phase === "hashing") {
+        concurrentHashing++;
+        peakConcurrentHashing = Math.max(peakConcurrentHashing, concurrentHashing);
+      } else if (job.phase === "done" && concurrentHashing > 0) {
+        concurrentHashing--;
+      }
+    });
+
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const romPath = path.join(srcDir, `game-${i}.nes`);
+      const buf = Buffer.alloc(2 * 1024 * 1024);
+      buf.write("NES\x1a", 0, "latin1");
+      randomFillSync(buf, 16, buf.length - 16);
+      writeFileSync(romPath, buf);
+
+      ids.push(
+        queue.enqueue(
+          fakePlannedJob({
+            sourcePath: romPath,
+            selectedSystemId: "nes",
+            action: "keep-zip",
+            destinationFolder: path.join(destDir, "nes"),
+            destinationFilename: `game-${i}.zip`,
+          }),
+        ).id,
+      );
+    }
+
+    for (const id of ids) expect((await waitForTerminal(queue, id))?.state).toBe("done");
+    // Give the serialized hash chain time to drain.
+    await new Promise((r) => setTimeout(r, 500));
+
+    expect(peakConcurrentHashing).toBe(1);
+  });
+
+  maybeIt("replaces an existing destination file only when the job asks to", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    const existing = path.join(psxDir, "Replace Me.chd");
+    writeFileSync(existing, "the old version");
+
+    const disc = makeRawCdTrack(srcDir, "Replace Me");
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    // Without replace, an existing destination is an error, not a silent overwrite.
+    const refused = queue.enqueue(
+      fakePlannedJob({ sourcePath: disc.cuePath, destinationFolder: psxDir, destinationFilename: "Replace Me.chd" }),
+    );
+    const refusedResult = await waitForTerminal(queue, refused.id);
+    expect(refusedResult?.state).toBe("failed");
+    expect(refusedResult?.error).toMatch(/already exists/);
+    expect(readFileSync(existing, "utf-8")).toBe("the old version");
+
+    // With replace, the new file takes its place.
+    const replacing = queue.enqueue(
+      fakePlannedJob({ sourcePath: disc.cuePath, destinationFolder: psxDir, destinationFilename: "Replace Me.chd", replace: true }),
+    );
+    const replaced = await waitForTerminal(queue, replacing.id);
+    expect(replaced?.state).toBe("done");
+    expect(replaced?.replaced).toBe("Replace Me.chd");
+    expect(readFileSync(existing, "utf-8")).not.toBe("the old version");
+    // No scratch or set-aside files left behind.
+    expect(readdirSync(psxDir).filter((n) => n.includes(".replaced-") || n.endsWith(".part"))).toEqual([]);
+  });
+
+  maybeIt("leaves the existing file untouched when a replace job fails", async () => {
+    // The whole point of moving the original aside rather than deleting it up front:
+    // a conversion that fails must not cost the user the file they already had.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    const psxDir = path.join(destDir, "psx");
+    mkdirSync(psxDir);
+
+    const existing = path.join(psxDir, "Keep Me.chd");
+    writeFileSync(existing, "the old version");
+
+    // A source chdman cannot convert, so the job fails before reaching the rename.
+    const bogusPath = path.join(srcDir, "Keep Me.cue");
+    writeFileSync(bogusPath, "this is not a real cue sheet");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({ sourcePath: bogusPath, destinationFolder: psxDir, destinationFilename: "Keep Me.chd", replace: true }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("failed");
+    expect(readFileSync(existing, "utf-8")).toBe("the old version");
+    expect(readdirSync(psxDir)).toEqual(["Keep Me.chd"]);
+  });
+
   maybeIt("reports real intermediate progress during a chdman conversion, not just stuck 0% until done", async () => {
     // chdman's own "Compressing, N% complete" stdout is silently suppressed by chdman itself
     // whenever it's piped rather than attached to a TTY — exactly how child_process.spawn
@@ -771,6 +1013,10 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
       expect(finished?.state).toBe("done");
       // The destination filename is exactly the original name — no id ever touched it.
       expect(existsSync(path.join(destDir, "nes", "Dark Cloud 2 (USA) (v2.00).zip"))).toBe(true);
+
+      // Source cleanup is deliberately chained behind the hashing pass — hashing has to
+      // read the source before anything deletes it — so it lands shortly after "done".
+      await new Promise((r) => setTimeout(r, 250));
       expect(existsSync(stagedPath)).toBe(false);
       expect(existsSync(uploadDir)).toBe(false);
     } finally {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { subscribeJobEvents, cancelJob, type JobInfo } from "../api";
+import { subscribeJobEvents, cancelJob, clearCompletedJobs, type JobInfo } from "../api";
 import { ActionBar } from "../ActionBar";
 
 function formatBytes(bytes: number | null): string {
@@ -95,10 +95,33 @@ export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
     }
   }
 
+  async function handleClearFinished() {
+    try {
+      await clearCompletedJobs();
+      // The server no longer knows about these jobs, and it only pushes updates for
+      // ones that change — so drop them here rather than waiting for an event that
+      // will never arrive.
+      setJobs((prev) => {
+        const next = new Map(prev);
+        for (const [id, job] of prev) {
+          if (job.state !== "queued" && job.state !== "running") next.delete(id);
+        }
+        return next;
+      });
+      setOrder((prev) => prev.filter((id) => {
+        const state = jobs.get(id)?.state;
+        return state === "queued" || state === "running";
+      }));
+    } catch {
+      // nothing destructive happened server-side if this failed; the list stays as-is
+    }
+  }
+
   const jobList = order.map((id) => jobs.get(id)).filter((j): j is JobInfo => !!j);
   const activeCount = jobList.filter((j) => j.state === "queued" || j.state === "running").length;
   const doneCount = jobList.filter((j) => j.state === "done").length;
   const failedCount = jobList.filter((j) => j.state === "failed").length;
+  const finishedCount = jobList.filter((j) => j.state !== "queued" && j.state !== "running").length;
 
   if (jobList.length === 0) {
     return (
@@ -141,6 +164,11 @@ export function QueuePage({ onDropMore }: { onDropMore: () => void }) {
           </span>
         }
       >
+        {finishedCount > 0 && (
+          <button type="button" onClick={handleClearFinished}>
+            Clear finished ({finishedCount})
+          </button>
+        )}
         <button type="button" className="button-primary" onClick={onDropMore}>
           Drop more files
         </button>

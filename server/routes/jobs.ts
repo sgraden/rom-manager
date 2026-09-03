@@ -12,12 +12,18 @@ jobsRouter.get("/", (_req, res) => {
 });
 
 /** Server-sent progress stream: an initial snapshot, then one event per job state/progress change. */
+const SSE_HEARTBEAT_MS = 20000;
+
 jobsRouter.get("/events", (req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
+    // The browser is talking to us directly, but a proxy in between would otherwise be
+    // free to buffer the stream and hold every progress update back until it closed.
+    "X-Accel-Buffering": "no",
   });
+  res.flushHeaders();
   res.write(`data: ${JSON.stringify({ type: "snapshot", jobs: jobQueue.list() })}\n\n`);
 
   const onUpdate = (job: unknown) => {
@@ -25,9 +31,20 @@ jobsRouter.get("/events", (req, res) => {
   };
   jobQueue.on("update", onUpdate);
 
+  // A queue can sit idle for minutes between jobs. A periodic comment keeps the
+  // connection demonstrably alive, and lets a dropped one surface as an error the
+  // browser can reconnect from rather than as an open socket that never speaks again.
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), SSE_HEARTBEAT_MS);
+
   req.on("close", () => {
+    clearInterval(heartbeat);
     jobQueue.off("update", onUpdate);
   });
+});
+
+/** Drops finished jobs from the in-memory list. History lives in data/library.jsonl. */
+jobsRouter.delete("/completed", (_req, res) => {
+  res.json({ removed: jobQueue.clearCompleted() });
 });
 
 /**

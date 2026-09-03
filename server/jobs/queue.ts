@@ -28,9 +28,10 @@ import { parseCueFile, parseGdiFile, resolveCcdCompanions } from "../detect/cues
 import { getFreeBytes } from "../library/targets.js";
 import { isPathInside, estimateOutputBytes } from "../library/fsutil.js";
 import { threadsPerJob } from "../library/cpuBudget.js";
-import { hashFile } from "../library/hash.js";
+import { hashFile, hashArchiveEntry, type FileHashes } from "../library/hash.js";
 import { appendLibraryRecord } from "../library/libraryLog.js";
 import type { DatIndex } from "../library/dat.js";
+import { listArchiveEntries } from "../detect/archive.js";
 import { STAGING_DIR } from "../lib/paths.js";
 import type { Job } from "./types.js";
 
@@ -41,6 +42,8 @@ export interface ToolPaths {
 }
 
 const ARCHIVE_EXTS = [".zip", ".7z", ".rar"];
+/** How many finished jobs the Queue list keeps before dropping the oldest (see trimHistory). */
+const MAX_RETAINED_FINISHED_JOBS = 200;
 const CUE_LIKE_EXTS = [".cue", ".gdi", ".ccd"];
 
 function findFirstMatch(dir: string, exts: string[]): string | null {
@@ -85,6 +88,14 @@ export class JobQueue extends EventEmitter {
    * other's rename, silently leaving only the later result behind.
    */
   private claimedDestinations = new Set<string>();
+  /**
+   * Serializes the post-completion hashing pass. Hashing reads the whole source file,
+   * so N jobs finishing together would otherwise start N multi-gigabyte reads at once,
+   * competing for the same disk as the N conversions that just took their run slots.
+   * The work is I/O-bound, so running it one at a time costs almost no throughput and
+   * keeps the bandwidth where the user can see it.
+   */
+  private hashChain: Promise<void> = Promise.resolve();
 
   constructor(
     private getMaxConcurrent: () => number,
@@ -95,6 +106,10 @@ export class JobQueue extends EventEmitter {
     private datIndex: DatIndex = { lookup: () => null, datFileCount: 0, romCount: 0 },
   ) {
     super();
+    // /api/jobs/events registers one "update" listener per open connection, so the
+    // default cap of 10 turns an eleventh browser tab into a spurious memory-leak
+    // warning. They're all legitimate, and they're removed on disconnect.
+    this.setMaxListeners(0);
   }
 
   /**
@@ -109,6 +124,38 @@ export class JobQueue extends EventEmitter {
 
   list(): Job[] {
     return this.order.map((id) => ({ ...this.jobs.get(id)! }));
+  }
+
+  /**
+   * Forgets every finished job, returning how many were dropped. The Queue page is a
+   * view of current work, not an archive — the durable record of what was processed
+   * is data/library.jsonl. Jobs still queued or running are left alone.
+   */
+  clearCompleted(): number {
+    const terminal = new Set(["done", "failed", "cancelled"]);
+    const keep = this.order.filter((id) => !terminal.has(this.jobs.get(id)!.state));
+    const removed = this.order.length - keep.length;
+
+    const kept = new Set(keep);
+    for (const id of this.order) {
+      if (!kept.has(id)) this.jobs.delete(id);
+    }
+    this.order = keep;
+    return removed;
+  }
+
+  /**
+   * Caps retained finished jobs, oldest first, so a long session's Queue list can't
+   * grow without bound. Only ever drops terminal jobs.
+   */
+  private trimHistory(): void {
+    const terminal = new Set(["done", "failed", "cancelled"]);
+    const finished = this.order.filter((id) => terminal.has(this.jobs.get(id)!.state));
+    if (finished.length <= MAX_RETAINED_FINISHED_JOBS) return;
+
+    const drop = new Set(finished.slice(0, finished.length - MAX_RETAINED_FINISHED_JOBS));
+    for (const id of drop) this.jobs.delete(id);
+    this.order = this.order.filter((id) => !drop.has(id));
   }
 
   get(id: string): Job | undefined {
@@ -139,6 +186,8 @@ export class JobQueue extends EventEmitter {
       destinationFolder: planned.destinationFolder,
       destinationFilename: planned.destinationFilename,
       destinationPath,
+      replace: planned.replace,
+      replaced: null,
       state: "queued",
       percent: 0,
       phase: "queued",
@@ -197,7 +246,9 @@ export class JobQueue extends EventEmitter {
       this.running.add(nextId);
       this.runJob(nextId).finally(() => {
         this.running.delete(nextId);
-        this.maybeWriteM3u();
+        const finished = this.jobs.get(nextId);
+        if (finished?.state === "done") this.maybeWriteM3u([finished.destinationFolder]);
+        this.trimHistory();
         this.pump();
       });
     }
@@ -336,7 +387,7 @@ export class JobQueue extends EventEmitter {
     try {
       if (this.cancelRequested.has(id)) throw new CancelledError();
 
-      if (existsSync(job.destinationPath)) {
+      if (existsSync(job.destinationPath) && !job.replace) {
         throw new Error(`A file already exists at ${job.destinationPath} — remove or rename it first.`);
       }
 
@@ -485,11 +536,43 @@ export class JobQueue extends EventEmitter {
       // Re-checked here, not just at the top: a conversion takes minutes, and the file
       // could have been put there in the meantime by another tool or a second card
       // insertion. renameSync would overwrite it without a word.
-      if (existsSync(job.destinationPath)) {
+      if (existsSync(job.destinationPath) && !job.replace) {
         throw new Error(`A file appeared at ${job.destinationPath} while this job was running — it was left untouched.`);
       }
 
-      renameSync(partPath, job.destinationPath);
+      // Replacing is done in this order deliberately: the existing file is moved aside
+      // (not deleted) only once the new one is fully converted and sitting in .part, and
+      // it's only deleted once the rename into its place has succeeded. A conversion
+      // that fails, or a rename that fails, therefore leaves the card exactly as it was.
+      let displacedPath: string | null = null;
+      if (job.replace && existsSync(job.destinationPath)) {
+        displacedPath = `${job.destinationPath}.replaced-${Date.now()}`;
+        renameSync(job.destinationPath, displacedPath);
+      }
+
+      try {
+        renameSync(partPath, job.destinationPath);
+      } catch (err) {
+        // Put the original back — the user asked to replace it, not to lose it.
+        if (displacedPath) {
+          try {
+            renameSync(displacedPath, job.destinationPath);
+          } catch {
+            // best effort; the .replaced- file is still on disk either way
+          }
+        }
+        throw err;
+      }
+
+      if (displacedPath) {
+        try {
+          unlinkSync(displacedPath);
+          job.replaced = job.destinationFilename;
+        } catch {
+          // The new file is in place, which is what matters; a leftover .replaced- file
+          // is cosmetic, and deleting it is not worth failing a successful job over.
+        }
+      }
       job.resultBytes = statSync(job.destinationPath).size;
       job.state = "done";
       job.percent = 100;
@@ -501,7 +584,20 @@ export class JobQueue extends EventEmitter {
       // delays completion feedback, freeing the run slot for the next queued job, or the
       // .m3u playlist write — but it must happen before cleanupSource, which may delete
       // the source, so that stays chained onto it rather than running independently.
-      void this.recordLibraryEntry(job).then(() => this.cleanupSource(job));
+      // Queued behind any hashing already in flight (see hashChain).
+      this.hashChain = this.hashChain.then(async () => {
+        job.phase = "hashing";
+        this.emitUpdate(job);
+        await this.recordLibraryEntry(job);
+        this.cleanupSource(job);
+        job.phase = "done";
+        this.emitUpdate(job);
+      }).catch((err) => {
+        // recordLibraryEntry and cleanupSource both swallow their own failures, so this
+        // only fires if an "update" listener threw. Absorb it regardless: a rejected
+        // hashChain would silently stop every later job from being hashed at all.
+        console.error("Post-job bookkeeping failed:", err instanceof Error ? err.message : err);
+      });
     } catch (err) {
       this.processes.delete(id);
       if (existsSync(partPath)) {
@@ -542,15 +638,50 @@ export class JobQueue extends EventEmitter {
    * foundation a future rename command can build on without re-hashing).
    * Best-effort: a hashing failure logs but never fails the job itself.
    */
+  /**
+   * What to hash for this job: the ROM itself wherever we can reach it, not the
+   * container it arrived in.
+   *
+   * A DAT indexes the ROM inside an archive, so hashing a .zip/.7z produces hashes
+   * that can never match — and for cartridge systems the source is almost always
+   * archived, which made DAT matching useless exactly where it's most wanted.
+   *
+   * Only single-entry archives are unwrapped. A multi-entry archive is a disc set
+   * (or a scene release with extra files), where there's no one file that stands for
+   * the whole thing, so the container's own hash stays the honest answer.
+   */
+  private hashTargetFor(job: Job): { hashes: Promise<FileHashes>; hashedName: string } {
+    const ext = path.extname(job.sourcePath).toLowerCase();
+    const sevenZipPath = this.getTools().sevenZipPath;
+
+    if (ARCHIVE_EXTS.includes(ext) && sevenZipPath) {
+      try {
+        const files = listArchiveEntries(sevenZipPath, job.sourcePath).filter((e) => !e.isDirectory);
+        if (files.length === 1) {
+          return {
+            hashes: hashArchiveEntry(sevenZipPath, job.sourcePath, files[0].name),
+            hashedName: files[0].name,
+          };
+        }
+      } catch {
+        // Couldn't list the archive — fall through and hash the container.
+      }
+    }
+
+    return { hashes: hashFile(job.sourcePath), hashedName: job.sourceName };
+  }
+
   private async recordLibraryEntry(job: Job): Promise<void> {
     try {
-      const hashes = await hashFile(job.sourcePath);
+      const target = this.hashTargetFor(job);
+      const hashes = await target.hashes;
       const datMatch = this.datIndex.lookup(hashes);
 
       appendLibraryRecord({
         timestamp: job.finishedAt ?? new Date().toISOString(),
         originalName: job.sourceName,
         hashes,
+        hashedName: target.hashedName,
         system: job.selectedSystemId,
         action: job.action,
         destination: job.destinationPath,
@@ -593,25 +724,49 @@ export class JobQueue extends EventEmitter {
     }
   }
 
-  /** Writes/refreshes .m3u playlists for any completed multi-disc group. Idempotent — safe to call after every job. */
-  private maybeWriteM3u() {
-    const doneJobs = this.order.map((id) => this.jobs.get(id)!).filter((j) => j.state === "done");
-    const files = doneJobs.map((j) => ({ folder: j.destinationFolder, filename: j.destinationFilename }));
-    const groups = groupForM3u(files);
-
-    for (const [key, group] of groups) {
-      if (group.discs.length < 2) continue;
-      const m3uName = m3uFilenameFor(key);
-      const m3uPath = path.join(group.folder, m3uName);
+  /**
+   * Writes/refreshes .m3u playlists for any multi-disc group the destination folder
+   * actually contains. Idempotent — safe to call after every job.
+   *
+   * Built from the folder's real contents rather than this session's job list. The
+   * job list is empty after every restart, so adding Disc 2 in a later session than
+   * Disc 1 previously produced no playlist at all (groupForM3u needs two discs to
+   * emit a group) and gave the user no sign it had been skipped. Reading the folder
+   * also picks up discs put there by any other tool.
+   *
+   * Scoped to the folders the just-finished jobs wrote to, so this doesn't rescan
+   * every destination on the card after every single job.
+   */
+  private maybeWriteM3u(folders: Iterable<string>) {
+    for (const folder of new Set(folders)) {
+      let filenames: string[];
       try {
-        writeFileSync(m3uPath, m3uContent(group.discs), "utf-8");
-        for (const j of doneJobs) {
-          if (j.destinationFolder === group.folder && group.discs.some((d) => d.filename === j.destinationFilename)) {
-            j.m3uWritten = m3uPath;
+        filenames = readdirSync(folder, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && !entry.name.startsWith(".") && !entry.name.toLowerCase().endsWith(".m3u"))
+          .map((entry) => entry.name);
+      } catch {
+        continue; // folder unreadable or gone (card pulled) — nothing to write
+      }
+
+      const groups = groupForM3u(filenames.map((filename) => ({ folder, filename })));
+
+      for (const [key, group] of groups) {
+        if (group.discs.length < 2) continue;
+        const m3uPath = path.join(group.folder, m3uFilenameFor(key));
+        try {
+          writeFileSync(m3uPath, m3uContent(group.discs), "utf-8");
+        } catch {
+          // Non-fatal — the individual disc files are already written correctly either way.
+          continue;
+        }
+        // Reflect the playlist on any of this session's jobs that are part of it, so
+        // the Queue page can say so. Jobs from earlier sessions simply aren't here.
+        for (const id of this.order) {
+          const job = this.jobs.get(id)!;
+          if (job.state === "done" && job.destinationFolder === group.folder && group.discs.some((d) => d.filename === job.destinationFilename)) {
+            job.m3uWritten = m3uPath;
           }
         }
-      } catch {
-        // Non-fatal — the individual disc files are already written correctly either way.
       }
     }
   }

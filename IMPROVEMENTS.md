@@ -14,10 +14,11 @@ would have caught it, then add a `> **Status: done.**` line under its heading sa
 Items are ordered by impact within each section. Nothing here requires a rewrite — they are all
 local changes.
 
-**Progress.** Done: §1.1, §1.2, §1.4, §1.5, §2.1, §2.2, §2.3, §2.7, §3.1, §3.2, §3.3.
-Remaining: §1.3, §1.6, §1.7, §2.4, §2.5, §2.6, §3.4, §3.5, §4 (Library page), §5 (design).
-As of that work the suite is 155 tests across 19 files, all passing, and both typechecks are
-clean.
+**Progress.** Sections 1, 2 and 3 are complete, and §4's server side is done (index, matching,
+routes, and the safe replace-on-write path). Still to do: §4's UI (Review Status column and the
+Library tab) and §5 (design). Sections 1–3 — every correctness, efficiency and
+robustness item listed below has landed, each with a test. Remaining: **§4** (Library page and
+duplicate matching) and **§5** (design work).
 
 ---
 
@@ -97,6 +98,8 @@ appeared on the card mid-conversion isn't clobbered.
 ---
 
 ### 1.3 `.m3u` playlists only ever see the current session's jobs
+> **Status: done.** `maybeWriteM3u` now reads the destination folder's real contents (skipping dotfiles and the playlist itself) and is scoped to the folders the finished job wrote to — which also resolves §2.6. Two new `queue.test.ts` cases, including a disc placed by an earlier session.
+
 
 **Where:** [server/jobs/queue.ts:567](server/jobs/queue.ts#L567), `maybeWriteM3u`.
 
@@ -162,6 +165,8 @@ crashes will always leak some.
 ---
 
 ### 1.6 Archived ROMs never match a DAT
+> **Status: done.** New `hashArchiveEntry` hashes the ROM's decompressed bytes straight from `7zz` stdout, and `hashTargetFor` uses it for single-entry archives; multi-entry archives still hash the container, which stays the honest answer for a disc set. `LibraryRecord.hashedName` records which was hashed. An entry filter that matches nothing now rejects instead of silently producing the empty digest.
+
 
 **Where:** [server/jobs/queue.ts:517](server/jobs/queue.ts#L517).
 
@@ -180,6 +185,8 @@ which.
 ---
 
 ### 1.7 `.gdi` parsing can be fooled by a comment or a quoted title
+> **Status: done.** Track filenames are now matched positionally against the real GDI line grammar, with an optional trailing offset. Four new `cuesheet.test.ts` cases.
+
 
 `GDI_TRACK_FILENAME` in [server/detect/cuesheet.ts](server/detect/cuesheet.ts) alternates a
 quoted-string match with a bare `\S+\.(bin|raw|iso)` match, applied to any non-empty line after
@@ -297,6 +304,8 @@ data.
 ---
 
 ### 2.4 Post-job hashing is unbounded and competes with active conversions
+> **Status: done.** Hashing runs through a serial `hashChain`, with a `hashing` phase emitted for the UI and a `.catch` so one failure can't stop every later job from being hashed. Covered by a test asserting peak concurrency is 1.
+
 
 **Where:** [server/jobs/queue.ts:475](server/jobs/queue.ts#L475).
 
@@ -311,6 +320,8 @@ work is I/O-bound, so serializing costs almost nothing in throughput and removes
 While it is pending, the Queue row can show "hashing…" — see §5.4.
 
 ### 2.5 `mount` is shelled out on every target listing
+> **Status: done.** The parsed mount table is cached for 3s.
+
 
 `listTargets` → `getMounts` runs `spawnSync("mount")` each call, and `listTargets` is called by
 `/api/targets`, `/api/plan`, `POST /api/jobs`, and three separate `/api/targets/:name/...`
@@ -318,6 +329,8 @@ routes (`targetsRouter.post("/:name/folders")` calls it twice). Cache the parsed
 a few seconds; volume topology does not change per-request.
 
 ### 2.6 `maybeWriteM3u` rescans and rewrites every group after every job
+> **Status: done.** Resolved as part of §1.3 — the call is now scoped to the finished job's own destination folder.
+
 
 Called from `pump`'s `finally` for each completed job, it iterates all done jobs and rewrites
 every multi-disc playlist. Harmless at ten jobs, wasteful at a thousand. Once §1.3 changes it to
@@ -375,6 +388,8 @@ an HTML `PayloadTooLargeError`.
 returns `{ error }` as JSON.
 
 ### 3.4 SSE stream has no heartbeat and no listener-cap adjustment
+> **Status: done.** `setMaxListeners(0)` on the queue, `flushHeaders()`, `X-Accel-Buffering: no`, and a 20s `: ping` comment cleared on disconnect.
+
 
 [server/routes/jobs.ts:229](server/routes/jobs.ts#L229) registers one `update` listener per open
 `/api/jobs/events` connection. Past ten concurrent tabs Node logs a MaxListenersExceededWarning,
@@ -384,6 +399,8 @@ and an idle connection can be dropped by intermediaries with no reconnect signal
 `writeHead`, and write a `: ping\n\n` comment every 20 s cleared on `req.on("close")`.
 
 ### 3.5 Job history is unbounded and lost on restart
+> **Status: done.** `DELETE /api/jobs/completed` plus a **Clear finished** button on the Queue page, and `trimHistory()` caps retained terminal jobs at 200.
+
 
 `JobQueue.jobs`/`order` grow forever within a process and vanish when it exits. There is no way
 to clear completed rows from the Queue page, and a long session accumulates a table of hundreds.
@@ -406,6 +423,8 @@ string ("A file named X already exists at the destination"), the job then hard-f
 user has no way to act on it from inside the app.
 
 ### 4.1 Server: a library index
+> **Status: server side done.** `server/library/libraryIndex.ts` scans the card and joins `library.jsonl` onto what it finds; `server/routes/library.ts` exposes `GET /api/library`, `POST /api/library/matches`, `DELETE /api/library/entry` (path rebuilt from the target's own romRoot and re-checked with `isPathInside`, files only) and `POST /api/library/reveal`. Six `libraryIndex.test.ts` cases.
+
 
 Add `server/library/index.ts` exporting a `LibraryIndex` built from two sources:
 
@@ -428,6 +447,8 @@ every keystroke.
 | `DELETE /api/library/entry` (body: `{ target, folder, filename }`) | Deletes one file from the card. Must validate with `isPathInside(fullPath, target.romRoot)` before unlinking, and must refuse a path outside it. |
 
 ### 4.2 Matching rules — strongest signal first
+> **Status: server side done.** `server/library/duplicates.ts` implements all four tiers with the tier reported alongside each match. `(Disc 1)` vs `(Disc 2)` is explicitly not a match, and matching is scoped to the destination folder so two systems' same-named games stay distinct. Nine `duplicates.test.ts` cases.
+
 
 For each planned source, compute a verdict of `exact` | `likely` | `name` | `none`:
 
@@ -450,6 +471,8 @@ page. Run tier 1 only when the file is small (say under 256 MB) or when the user
 verdict — that is what makes the answer trustworthy.
 
 ### 4.3 Review page: the Replace / Skip decision
+> **Status: server side done.** The write path is in place: `replace` flows through `PlanOverride` → `PlannedJob` → `Job`, and the queue moves the existing file aside only after the conversion succeeds, deletes it only after the rename succeeds, and restores it if the rename fails. Two `queue.test.ts` cases, including one asserting a failed replace leaves the original untouched. **The Review UI itself is still to do.**
+
 
 Add a **Status** column to the Review table. For a non-`none` verdict, the row renders:
 

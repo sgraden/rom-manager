@@ -36,3 +36,27 @@ export class BufferReader implements ByteReader {
     return this.buf.subarray(offset, Math.min(offset + length, this.buf.length));
   }
 }
+
+/**
+ * A ByteReader over the first `prefix.length` bytes of something larger — used for
+ * archive entries, which are streamed to a bounded buffer rather than extracted in
+ * full (see readArchiveEntryPrefix).
+ *
+ * `size` reports the entry's real total size, not the prefix's, because probes
+ * legitimately branch on it (detectIpBinStrings clamps its read to it, cuegen's
+ * sector-mode check divides by it). Reads past the prefix return null — the same
+ * thing a genuine EOF returns — so a probe that needs bytes we don't have simply
+ * finds no match. Callers must treat "no confident match" as possible truncation
+ * and fall back to reading the whole entry.
+ */
+export class PrefixReader implements ByteReader {
+  constructor(
+    private readonly prefix: Buffer,
+    readonly size: number,
+  ) {}
+
+  readAt(offset: number, length: number): Buffer | null {
+    if (offset < 0 || offset >= this.prefix.length || length <= 0) return null;
+    return this.prefix.subarray(offset, Math.min(offset + length, this.prefix.length));
+  }
+}

@@ -11,6 +11,9 @@ export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 export const CONFIG_EXAMPLE_PATH = path.join(CONFIG_DIR, "config.example.json");
 export const DATS_DIR = path.join(CONFIG_DIR, "dats");
 export const DATA_DIR = path.join(ROOT_DIR, "data");
-export const LIBRARY_PATH = path.join(DATA_DIR, "library.json");
+/** The append-only processing log. One JSON record per line — see libraryLog.ts. */
+export const LIBRARY_LOG_PATH = path.join(DATA_DIR, "library.jsonl");
+/** The pre-JSONL log: a single JSON array. Read once at startup and migrated, never written. */
+export const LEGACY_LIBRARY_PATH = path.join(DATA_DIR, "library.json");
 export const STAGING_DIR = path.join(ROOT_DIR, "staging");
 export const WEB_DIST_DIR = path.join(ROOT_DIR, "web", "dist");

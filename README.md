@@ -1,10 +1,15 @@
 # ROM Manager
 
+> **Built with AI.** This project was written with the assistance of AI coding tools. Every
+> feature was reviewed and tested against real conversions, but treat the code accordingly.
+
 A local web app for curating a ROM library: drop a file in, it detects the console, converts
 disc images to space-efficient CHD/RVZ, and files the result into the right per-system folder
 on a destination (an SD card, an external drive, wherever). Built for personal use on macOS.
 
 Full design/architecture is in [PLAN.md](PLAN.md). This README covers install and day-to-day use.
+Known bugs, performance work, and planned features are tracked in
+[IMPROVEMENTS.md](IMPROVEMENTS.md).
 
 **Status:** Phase 4 of 5 — the app is fully functional end to end. Drop or path-in files, review
 the detected system/action/destination, hit **Process**, and it actually converts (via `chdman`/

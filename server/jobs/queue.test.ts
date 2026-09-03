@@ -1,28 +1,32 @@
 import { describe, it, expect, afterEach, afterAll, vi } from "vitest";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { randomFillSync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// Every successful job appends a record to LIBRARY_PATH — redirect it to a
+// Every successful job appends a record to LIBRARY_LOG_PATH — redirect it to a
 // scratch file so running this suite never writes fake entries into the
-// real data/library.json. STAGING_DIR is preserved unchanged, since several
+// real data/library.jsonl. STAGING_DIR is preserved unchanged, since several
 // tests below rely on the real one for staged-upload cleanup behavior.
 vi.mock("../lib/paths.js", async () => {
   const actual = await vi.importActual<typeof import("../lib/paths.js")>("../lib/paths.js");
   const os = await import("node:os");
   const path = await import("node:path");
-  return { ...actual, LIBRARY_PATH: path.join(os.tmpdir(), "rom-manager-queue-test-library.json") };
+  const scratch = path.join(os.tmpdir(), "rom-manager-queue-test-library");
+  // Both paths must be redirected. LEGACY_LIBRARY_PATH left pointing at the real
+  // data/library.json would let the migration in libraryLog.ts run against the user's
+  // actual processing history the first time this suite runs.
+  return { ...actual, LIBRARY_LOG_PATH: `${scratch}.jsonl`, LEGACY_LIBRARY_PATH: `${scratch}.json` };
 });
 
 import { JobQueue, type ToolPaths } from "./queue.js";
 import type { PlannedJob } from "../library/plan.js";
 import { detectTools } from "../convert/tools.js";
-import { STAGING_DIR, LIBRARY_PATH } from "../lib/paths.js";
+import { STAGING_DIR, LIBRARY_LOG_PATH } from "../lib/paths.js";
 
 afterAll(() => {
-  rmSync(LIBRARY_PATH, { force: true });
+  rmSync(LIBRARY_LOG_PATH, { force: true });
 });
 
 // This test suite runs real chdman/7zz conversions end to end. It only ever
@@ -183,7 +187,10 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     // Give the async recordLibraryEntry (which runs after "done" is reported) a moment to land.
     await new Promise((r) => setTimeout(r, 100));
 
-    const records = JSON.parse(readFileSync(LIBRARY_PATH, "utf-8"));
+    const records = readFileSync(LIBRARY_LOG_PATH, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
     const record = records.find((r: { originalName: string }) => r.originalName === "game.nes");
     expect(record).toBeDefined();
     // Ground truth computed independently in the same way as hash.test.ts.
@@ -508,6 +515,97 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     expect(finished?.error).toBeNull();
     expect(finished?.action).toBe("chd-cd"); // corrected so the Queue page shows what actually ran
     expect(existsSync(path.join(destDir, "ps2", "Smuggler's Run (USA).chd"))).toBe(true);
+  });
+
+  maybeIt("refuses to enqueue a second job aimed at the same destination", async () => {
+    // Both jobs would otherwise pass the existsSync check at the top of runJob (neither
+    // destination exists yet), then race each other's rename, leaving only one result
+    // behind with no indication the other was lost.
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+
+    const first = makeRawCdTrack(srcDir, "Game A");
+    const second = makeRawCdTrack(srcDir, "Game B");
+
+    const queue = new JobQueue(
+      () => 2,
+      () => false,
+      () => toolPaths,
+    );
+
+    const shared = { destinationFolder: path.join(destDir, "psx"), destinationFilename: "Same Name.chd" };
+    queue.enqueue(fakePlannedJob({ sourcePath: first.cuePath, ...shared }));
+
+    expect(() => queue.enqueue(fakePlannedJob({ sourcePath: second.cuePath, ...shared }))).toThrow(/already writing to/);
+  });
+
+  maybeIt("frees a destination claim once the job finishes, so it can be re-run", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+    const disc = makeRawCdTrack(srcDir, "Retry Me");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const planned = fakePlannedJob({
+      sourcePath: disc.cuePath,
+      destinationFolder: path.join(destDir, "psx"),
+      destinationFilename: "Retry Me.chd",
+    });
+
+    const job = queue.enqueue(planned);
+    await waitForTerminal(queue, job.id);
+
+    // The claim is released, so re-enqueueing is allowed — the job then fails on the
+    // real reason (the file is now actually there), not on a stale claim.
+    const again = queue.enqueue(planned);
+    const finished = await waitForTerminal(queue, again.id);
+    expect(finished?.state).toBe("failed");
+    expect(finished?.error).toMatch(/already exists/);
+  });
+
+  maybeIt("gives each job its own .part file rather than sharing one per destination", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx"));
+    const disc = makeRawCdTrack(srcDir, "Part Path");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => false,
+      () => toolPaths,
+    );
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: disc.cuePath,
+        destinationFolder: path.join(destDir, "psx"),
+        destinationFilename: "Part Path.chd",
+      }),
+    );
+
+    const partPaths: string[] = [];
+    const watcher = setInterval(() => {
+      for (const name of readdirSync(path.join(destDir, "psx"))) {
+        if (name.endsWith(".part") && !partPaths.includes(name)) partPaths.push(name);
+      }
+    }, 10);
+
+    const finished = await waitForTerminal(queue, job.id);
+    clearInterval(watcher);
+
+    expect(finished?.state).toBe("done");
+    // Whatever scratch file was observed must have carried the job id, not just ".chd.part".
+    for (const name of partPaths) {
+      expect(name).toContain(job.id);
+    }
+    // And nothing is left behind.
+    expect(readdirSync(path.join(destDir, "psx")).filter((n) => n.endsWith(".part"))).toEqual([]);
   });
 
   maybeIt("reports real intermediate progress during a chdman conversion, not just stuck 0% until done", async () => {

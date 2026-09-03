@@ -86,13 +86,20 @@ export function ReviewPage({
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
 
-  async function replan(nextOverrides: Record<string, PlanOverride>) {
+  /**
+   * Re-plans `sourcePaths` and merges the results into the table, leaving every other
+   * row untouched. Scoping this matters: planning re-runs detection on each path, and
+   * for an archived disc that means 7zz work — so re-planning all twenty rows to
+   * reflect one dropdown change was doing nineteen files' worth of pointless work.
+   */
+  async function replan(nextOverrides: Record<string, PlanOverride>, sourcePaths: string[]) {
+    if (sourcePaths.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const sourcePaths = jobs.map((j) => j.sourcePath);
       const { jobs: replanned } = await planJobs(sourcePaths, targetName, nextOverrides);
-      setJobs(replanned);
+      const bySourcePath = new Map(replanned.map((j) => [j.sourcePath, j] as const));
+      setJobs((prev) => prev.map((job) => bySourcePath.get(job.sourcePath) ?? job));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -103,14 +110,17 @@ export function ReviewPage({
   async function applyOverride(sourcePath: string, next: PlanOverride) {
     const nextOverrides = { ...overrides, [sourcePath]: { ...overrides[sourcePath], ...next } };
     setOverrides(nextOverrides);
-    await replan(nextOverrides);
+    await replan(nextOverrides, [sourcePath]);
   }
 
   async function handleCreateFolder(systemId: string, defaultName: string) {
     setError(null);
     try {
       await createFolder(targetName, systemId, defaultName);
-      await replan(overrides);
+      // Unlike an override, a new folder can resolve the destination for every row
+      // mapped to that system, so all of them need re-planning — but only those.
+      const affected = jobs.filter((j) => j.selectedSystemId === systemId).map((j) => j.sourcePath);
+      await replan(overrides, affected);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }

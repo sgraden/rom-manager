@@ -1,13 +1,13 @@
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
-import { FileReader } from "./fileReader.js";
+import { FileReader, PrefixReader } from "./fileReader.js";
 import { detectCartridgeSignatures } from "./signatures.js";
 import { detectDiscMagic, detectIso9660, detectIpBinStrings } from "./disc.js";
 import { parseCueFile, parseGdiFile, resolveCcdCompanions, type DiscSet } from "./cuesheet.js";
-import { listArchiveEntries, extractArchive } from "./archive.js";
+import { listArchiveEntries, extractArchive, extractArchiveEntry, readArchiveEntryPrefix } from "./archive.js";
 import { systemsForExtension } from "./extensions.js";
-import type { DetectionCandidate, DetectionResult } from "./types.js";
+import type { ByteReader, DetectionCandidate, DetectionResult } from "./types.js";
 
 export interface DetectOptions {
   /** Resolved path to the 7zz binary, or null if it wasn't found (archives can't be inspected). */
@@ -20,7 +20,67 @@ const CUE_LIKE_EXTS = new Set([".cue", ".gdi", ".ccd"]);
 // isn't parsed as ISO9660 in v1, so it only ever gets extension-fallback candidates.
 const DISC_EXTS = new Set([".iso", ".bin", ".img", ".cdi", ".nrg", ".chd"]);
 
+/**
+ * How much of an archive entry to stream before giving up on the fast path. Sized to
+ * cover every offset the probes actually look at: the GameCube/Wii magic (0x1c), the
+ * IP.BIN string window (first 64KB), the ISO9660 PVD (sector 16, 32KB) and a root
+ * directory extent shortly after it, and SNES ExHiROM's header at ~4MB.
+ */
+const PREFIX_BYTES = 8 * 1024 * 1024;
+
+/** Below this, a candidate is an extension guess rather than byte-level evidence (see detectFromReader). */
+const MIN_CONFIDENT_CONFIDENCE = 0.5;
+
+/**
+ * Detection is a pure function of a file's bytes, so its result can be cached on an
+ * identity that changes whenever those bytes do: path, mtime, and size. This matters
+ * because the same file is detected repeatedly in one workflow — once to build the
+ * plan, again on every Review override, again when Process rebuilds the plan
+ * server-side — and for an archive each of those was a full decompression.
+ *
+ * Bounded so a long session can't grow it without limit; eviction is oldest-first,
+ * which for this access pattern (a batch of files worked on together, then dropped)
+ * is as good as anything more elaborate.
+ */
+const MAX_CACHE_ENTRIES = 500;
+const detectionCache = new Map<string, DetectionResult>();
+
+function cacheKey(filePath: string, options: DetectOptions): string | null {
+  try {
+    const stat = statSync(filePath);
+    // sevenZipPath is part of the key because it changes the answer: without 7zz,
+    // an archive detects as an uninspectable "archive" rather than its contents.
+    return `${filePath}\u0000${stat.mtimeMs}\u0000${stat.size}\u0000${options.sevenZipPath ?? ""}`;
+  } catch {
+    return null; // unstattable — let the real detection path produce the error
+  }
+}
+
 export function detectPath(filePath: string, options: DetectOptions): DetectionResult {
+  const key = cacheKey(filePath, options);
+  if (key) {
+    const hit = detectionCache.get(key);
+    if (hit) return hit;
+  }
+
+  const result = detectPathUncached(filePath, options);
+
+  if (key) {
+    if (detectionCache.size >= MAX_CACHE_ENTRIES) {
+      const oldest = detectionCache.keys().next();
+      if (!oldest.done) detectionCache.delete(oldest.value);
+    }
+    detectionCache.set(key, result);
+  }
+  return result;
+}
+
+/** Drops every cached detection result. Exposed for tests and for a future manual "re-scan". */
+export function clearDetectionCache(): void {
+  detectionCache.clear();
+}
+
+function detectPathUncached(filePath: string, options: DetectOptions): DetectionResult {
   const ext = path.extname(filePath).toLowerCase();
 
   if (ARCHIVE_EXTS.has(ext)) return detectArchive(filePath, options);
@@ -32,7 +92,7 @@ function rankByConfidence(candidates: DetectionCandidate[]): DetectionCandidate[
   return [...candidates].sort((a, b) => b.confidence - a.confidence);
 }
 
-function runDiscProbes(reader: FileReader): DetectionCandidate[] {
+function runDiscProbes(reader: ByteReader): DetectionCandidate[] {
   const candidates: DetectionCandidate[] = [];
   const magic = detectDiscMagic(reader);
   if (magic) candidates.push(magic);
@@ -41,28 +101,36 @@ function runDiscProbes(reader: FileReader): DetectionCandidate[] {
   return candidates;
 }
 
+/**
+ * The probe pipeline itself, over any ByteReader — a real file, or the streamed
+ * prefix of an archive entry. Shared so both paths produce identical verdicts.
+ */
+function detectFromReader(reader: ByteReader, ext: string): DetectionResult {
+  let candidates: DetectionCandidate[] = [];
+  const isDiscExt = DISC_EXTS.has(ext);
+
+  if (isDiscExt) {
+    candidates = runDiscProbes(reader);
+  }
+  if (candidates.length === 0) {
+    candidates = detectCartridgeSignatures(reader, ext);
+  }
+  if (candidates.length === 0) {
+    candidates = systemsForExtension(ext).map((systemId) => ({
+      systemId,
+      confidence: 0.3,
+      evidence: `Extension ${ext} is used by this system (no byte-level signature matched)`,
+    }));
+  }
+
+  const kind = candidates.length === 0 ? "unknown" : isDiscExt ? "disc" : "cartridge";
+  return { kind, candidates: rankByConfidence(candidates) };
+}
+
 function detectPlainFile(filePath: string, ext: string): DetectionResult {
   const reader = new FileReader(filePath);
   try {
-    let candidates: DetectionCandidate[] = [];
-    const isDiscExt = DISC_EXTS.has(ext);
-
-    if (isDiscExt) {
-      candidates = runDiscProbes(reader);
-    }
-    if (candidates.length === 0) {
-      candidates = detectCartridgeSignatures(reader, ext);
-    }
-    if (candidates.length === 0) {
-      candidates = systemsForExtension(ext).map((systemId) => ({
-        systemId,
-        confidence: 0.3,
-        evidence: `Extension ${ext} is used by this system (no byte-level signature matched)`,
-      }));
-    }
-
-    const kind = candidates.length === 0 ? "unknown" : isDiscExt ? "disc" : "cartridge";
-    return { kind, candidates: rankByConfidence(candidates) };
+    return detectFromReader(reader, ext);
   } finally {
     reader.close();
   }
@@ -130,26 +198,57 @@ function detectArchive(archivePath: string, options: DetectOptions): DetectionRe
     };
   }
 
+  const targetEntry = cueEntry ?? entries[0];
+
+  const wrap = (inner: DetectionResult, contentBytes: number): DetectionResult => ({
+    kind: inner.kind,
+    candidates: inner.candidates.map((c) => ({ ...c, evidence: `(inside archive) ${c.evidence}` })),
+    warnings: inner.warnings,
+    relatedFiles: [archivePath],
+    // The archive's own size (what the caller stat'd) is its *compressed* size — this is
+    // the real decompressed content size, which is what size estimates and sector-alignment
+    // checks actually need.
+    contentBytes: inner.contentBytes ?? contentBytes,
+  });
+
+  // Fast path: stream a bounded prefix of the one entry we care about instead of
+  // decompressing the whole archive. Skipped for a cue-like target, whose companion
+  // .bin tracks have to exist on disk beside it for parseCueFile to resolve them.
+  if (!cueEntry) {
+    const ext = path.extname(targetEntry.name).toLowerCase();
+    const prefix = readArchiveEntryPrefix(options.sevenZipPath, archivePath, targetEntry.name, PREFIX_BYTES);
+    if (prefix) {
+      const inner = detectFromReader(new PrefixReader(prefix, targetEntry.size || prefix.length), ext);
+      // A byte-level probe matched, so the prefix held everything that mattered and the
+      // verdict is final. Anything at or below the extension-fallback confidence means
+      // the evidence may simply have been past the prefix — fall through and read it all
+      // rather than reporting a weaker answer than a full read would have given.
+      if ((inner.candidates[0]?.confidence ?? 0) >= MIN_CONFIDENT_CONFIDENCE) {
+        return wrap(inner, targetEntry.size || prefix.length);
+      }
+    }
+  }
+
   const tmpDir = mkdtempSync(path.join(os.tmpdir(), "rom-manager-detect-"));
   try {
-    extractArchive(options.sevenZipPath, archivePath, tmpDir);
-    const targetName = cueEntry ? cueEntry.name : entries[0].name;
-    const targetPath = path.join(tmpDir, targetName);
-    if (!existsSync(targetPath)) {
-      return { kind: "archive", candidates: [], warnings: [`Extracted archive did not contain expected entry ${targetName}`] };
+    // A cue set needs every sibling track file on disk; a lone entry does not, so it's
+    // extracted on its own (flattened, hence basename below) rather than with the rest.
+    let targetPath: string;
+    if (cueEntry) {
+      extractArchive(options.sevenZipPath, archivePath, tmpDir);
+      targetPath = path.join(tmpDir, cueEntry.name);
+    } else {
+      extractArchiveEntry(options.sevenZipPath, archivePath, tmpDir, targetEntry.name);
+      targetPath = path.join(tmpDir, path.basename(targetEntry.name));
     }
 
-    const inner = detectPath(targetPath, options);
-    return {
-      kind: inner.kind,
-      candidates: inner.candidates.map((c) => ({ ...c, evidence: `(inside archive) ${c.evidence}` })),
-      warnings: inner.warnings,
-      relatedFiles: [archivePath],
-      // The archive's own size (what the caller stat'd) is its *compressed* size — this is
-      // the real decompressed content size, which is what size estimates and sector-alignment
-      // checks actually need.
-      contentBytes: inner.contentBytes ?? statSync(targetPath).size,
-    };
+    if (!existsSync(targetPath)) {
+      return { kind: "archive", candidates: [], warnings: [`Extracted archive did not contain expected entry ${targetEntry.name}`] };
+    }
+
+    // Uncached: targetPath is a scratch file that is deleted moments from now, so caching
+    // it would only fill the cache with keys that can never be hit again.
+    return wrap(detectPathUncached(targetPath, options), statSync(targetPath).size);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

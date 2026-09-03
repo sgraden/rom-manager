@@ -78,6 +78,13 @@ export class JobQueue extends EventEmitter {
   private processes = new Map<string, ChildProcess>();
   private cancelRequested = new Set<string>();
   private reservedBytes = new Map<string, number>();
+  /**
+   * Destination paths spoken for by a queued or running job. Two jobs writing the
+   * same destination would otherwise both pass the existsSync check at the top of
+   * runJob — it runs before a conversion that takes minutes — and then race each
+   * other's rename, silently leaving only the later result behind.
+   */
+  private claimedDestinations = new Set<string>();
 
   constructor(
     private getMaxConcurrent: () => number,
@@ -114,6 +121,13 @@ export class JobQueue extends EventEmitter {
       throw new Error(`Cannot enqueue ${planned.sourceName}: system, action, or destination is unresolved.`);
     }
 
+    const destinationPath = path.join(planned.destinationFolder, planned.destinationFilename);
+    if (this.claimedDestinations.has(destinationPath)) {
+      throw new Error(
+        `Another queued job is already writing to ${destinationPath}. Remove one of them, or rename it, before processing.`,
+      );
+    }
+
     const id = randomUUID();
     const job: Job = {
       id,
@@ -124,7 +138,7 @@ export class JobQueue extends EventEmitter {
       action: planned.action,
       destinationFolder: planned.destinationFolder,
       destinationFilename: planned.destinationFilename,
-      destinationPath: path.join(planned.destinationFolder, planned.destinationFilename),
+      destinationPath,
       state: "queued",
       percent: 0,
       phase: "queued",
@@ -139,6 +153,7 @@ export class JobQueue extends EventEmitter {
 
     this.jobs.set(id, job);
     this.order.push(id);
+    this.claimedDestinations.add(destinationPath);
     this.emitUpdate(job);
     this.pump();
     return { ...job };
@@ -151,6 +166,9 @@ export class JobQueue extends EventEmitter {
     if (job.state === "queued") {
       job.state = "cancelled";
       job.finishedAt = new Date().toISOString();
+      // This job never reaches runJob, so its destination claim is released here
+      // instead — otherwise the path would stay blocked for the rest of the session.
+      this.claimedDestinations.delete(job.destinationPath);
       this.emitUpdate(job);
       return true;
     }
@@ -309,7 +327,11 @@ export class JobQueue extends EventEmitter {
 
     let tmpDir: string | null = null;
     let genCueDir: string | null = null;
-    const partPath = `${job.destinationPath}.part`;
+    // Scoped to the job id, not just the destination: two jobs aimed at the same
+    // destination must never share a scratch file, or they'd interleave their writes
+    // into it. enqueue() rejects that collision up front, but a unique name means a
+    // stray .part from a killed process can't be picked up by a later job either.
+    const partPath = `${job.destinationPath}.${job.id}.part`;
 
     try {
       if (this.cancelRequested.has(id)) throw new CancelledError();
@@ -460,6 +482,13 @@ export class JobQueue extends EventEmitter {
       this.processes.delete(id);
       if (this.cancelRequested.has(id)) throw new CancelledError();
 
+      // Re-checked here, not just at the top: a conversion takes minutes, and the file
+      // could have been put there in the meantime by another tool or a second card
+      // insertion. renameSync would overwrite it without a word.
+      if (existsSync(job.destinationPath)) {
+        throw new Error(`A file appeared at ${job.destinationPath} while this job was running — it was left untouched.`);
+      }
+
       renameSync(partPath, job.destinationPath);
       job.resultBytes = statSync(job.destinationPath).size;
       job.state = "done";
@@ -494,6 +523,7 @@ export class JobQueue extends EventEmitter {
     } finally {
       this.cancelRequested.delete(id);
       this.reservedBytes.delete(id);
+      this.claimedDestinations.delete(job.destinationPath);
       for (const dir of [tmpDir, genCueDir]) {
         if (!dir) continue;
         try {

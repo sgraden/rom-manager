@@ -26,9 +26,37 @@ export interface AppConfig {
   systemActionOverrides: Record<string, string>;
 }
 
-const DEFAULTS: Pick<AppConfig, "reservedCpuCores"> = {
+/**
+ * A complete AppConfig, not a partial one. Every field a user's config.json is
+ * missing is backfilled from here, so a config.json written by an older version of
+ * the app keeps working after an upgrade rather than leaving a field `undefined`
+ * for something downstream to dereference (resolveFolderMap reads
+ * config.targetFolderMaps[...] unguarded, for one).
+ */
+const DEFAULTS: AppConfig = {
+  port: 3001,
+  maxConcurrentJobs: 2,
   reservedCpuCores: 2,
+  verifyAfterConvert: true,
+  deleteSourceAfterSuccess: false,
+  additionalTargetPaths: [],
+  toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
+  targetFolderMaps: {},
+  systemActionOverrides: {},
 };
+
+/**
+ * Fills in anything the stored config omits. toolPathOverrides is merged one level
+ * deeper than the rest — a config that sets only `chdman` must still end up with
+ * the other three keys present, since detectTools indexes into it by tool id.
+ */
+export function withDefaults(stored: Partial<AppConfig>): AppConfig {
+  return {
+    ...DEFAULTS,
+    ...stored,
+    toolPathOverrides: { ...DEFAULTS.toolPathOverrides, ...(stored.toolPathOverrides ?? {}) },
+  };
+}
 
 function ensureRuntimeDirs(): void {
   for (const dir of [CONFIG_DIR, DATS_DIR, DATA_DIR, STAGING_DIR]) {
@@ -48,9 +76,16 @@ export function loadConfig(): AppConfig {
   }
 
   const raw = readFileSync(CONFIG_PATH, "utf-8");
-  // Backfill any fields added since a user's config.json was first generated,
-  // so upgrading the app doesn't require deleting/regenerating their config.
-  cached = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<AppConfig>) } as AppConfig;
+  let stored: Partial<AppConfig> = {};
+  try {
+    stored = raw.trim() ? (JSON.parse(raw) as Partial<AppConfig>) : {};
+  } catch (err) {
+    // A hand-edited config with a stray comma shouldn't make the app unstartable —
+    // fall back to defaults and say so loudly rather than crashing on boot.
+    console.error(`config.json is not valid JSON (${err instanceof Error ? err.message : err}) — using defaults for this run.`);
+  }
+
+  cached = withDefaults(stored);
   return cached;
 }
 

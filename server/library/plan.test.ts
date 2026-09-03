@@ -300,4 +300,38 @@ describe("buildPlan", () => {
     expect(job.sourceBytes).toBe(300 * 2352);
     expect(job.action).toBe("chd-cd");
   });
+
+  it("keeps planning the rest of the batch when one file can't be inspected", () => {
+    // A source that was moved or unmounted between being added and the plan being built.
+    // Detection throws on it; that must not discard the plan for every other file.
+    const root = makeTempDir();
+    const romRoot = path.join(root, "roms");
+    mkdirSync(path.join(romRoot, "nes"), { recursive: true });
+    const goodPath = makeNesRom(root, "good.nes");
+    const missingPath = path.join(root, "vanished.nes");
+
+    const target: TargetInfo = {
+      name: "TESTCARD",
+      path: root,
+      romRoot,
+      freeBytes: 1_000_000_000,
+      totalBytes: 2_000_000_000,
+      fsType: "exfat",
+      writable: true,
+      folders: ["nes"],
+    };
+
+    const jobs = buildPlan([missingPath, goodPath], target, fakeConfig(), { sevenZipPath: null });
+
+    expect(jobs).toHaveLength(2);
+
+    const [missing, good] = jobs;
+    expect(missing.selectedSystemId).toBeNull();
+    expect(missing.sourceKind).toBe("unknown");
+    expect(missing.warnings.some((w) => w.includes("Could not inspect this file"))).toBe(true);
+
+    // The readable file is planned exactly as it would have been on its own.
+    expect(good.selectedSystemId).toBe("nes");
+    expect(good.destinationFilename).toBe("good.zip");
+  });
 });

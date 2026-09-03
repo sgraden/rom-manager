@@ -1,7 +1,7 @@
 import path from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { detectPath, type DetectOptions } from "../detect/index.js";
-import type { DetectionCandidate } from "../detect/types.js";
+import type { DetectionCandidate, DetectionResult } from "../detect/types.js";
 import { getSystem, type ConvertAction } from "./systems.js";
 import { resolveFolderMap, type TargetInfo } from "./targets.js";
 import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor } from "./fsutil.js";
@@ -89,7 +89,21 @@ function buildOne(
     warnings.push("Could not read source file size.");
   }
 
-  const detection = detectPath(sourcePath, options);
+  // Detection reads the file (and, for archives, shells out to 7zz), so anything from a
+  // source that vanished mid-session to a permissions problem to a malformed archive can
+  // throw here. Contain it per-file: an unreadable file becomes an ordinary unresolved row
+  // the Review page already knows how to render, rather than a 500 that discards the plan
+  // for every other file in the batch.
+  let detection: DetectionResult;
+  try {
+    detection = detectPath(sourcePath, options);
+  } catch (err) {
+    detection = {
+      kind: "unknown",
+      candidates: [],
+      warnings: [`Could not inspect this file: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
   if (detection.warnings) warnings.push(...detection.warnings);
 
   // For an archive, statSync above measured the *compressed* .7z/.zip size — size estimates,

@@ -147,6 +147,28 @@ function probe(spec: ToolSpec, override: string | null): ToolInfo {
   };
 }
 
+/**
+ * Probing is expensive — one spawnSync per tool, measured at ~300ms for the four of
+ * them together, on the request's main thread. detectTools is called from /api/tools,
+ * /api/detect, /api/plan, POST /api/jobs, and once per job from the queue, so without
+ * a cache that cost lands on essentially every request the app makes.
+ *
+ * Tool paths only change when the user installs something or edits an override, so the
+ * cache is keyed on the overrides and cleared explicitly by refreshTools(). Settings
+ * exposes that, so someone who has just run `brew install` doesn't need to restart.
+ */
+let cache: { key: string; tools: ToolInfo[] } | null = null;
+
 export function detectTools(overrides: ToolPathOverrides): ToolInfo[] {
-  return SPECS.map((spec) => probe(spec, overrides[spec.id]));
+  const key = JSON.stringify(overrides);
+  if (cache && cache.key === key) return cache.tools;
+
+  const tools = SPECS.map((spec) => probe(spec, overrides[spec.id]));
+  cache = { key, tools };
+  return tools;
+}
+
+/** Discards the memoized probe results, so the next detectTools() re-runs the real probes. */
+export function refreshTools(): void {
+  cache = null;
 }

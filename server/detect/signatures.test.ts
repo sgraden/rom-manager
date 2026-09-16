@@ -14,6 +14,13 @@ describe("detectCartridgeSignatures", () => {
     expect(candidates.some((c) => c.systemId === "nes")).toBe(true);
   });
 
+  it("detects 3DS via the 'NCSD' container magic at 0x100", () => {
+    const buf = blank(0x200);
+    buf.write("NCSD", 0x100, "ascii");
+    const candidates = detectCartridgeSignatures(new BufferReader(buf), ".3ds");
+    expect(candidates.some((c) => c.systemId === "3ds")).toBe(true);
+  });
+
   it("detects Genesis via the 'SEGA' marker at 0x100", () => {
     const buf = blank(0x200);
     buf.write("SEGA", 0x100, "ascii");

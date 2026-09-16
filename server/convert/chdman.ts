@@ -16,12 +16,21 @@ function run(chdmanPath: string, args: string[], phase: string, options: RunOpti
     const child = spawn(chdmanPath, args, options.cwd ? { cwd: options.cwd } : {});
     options.registerProcess?.(child);
 
+    // chdman's \r-updated "Compressing, N% complete..." line repeats constantly over a long
+    // conversion — a simple rolling tail of raw output means a failure deep into a multi-GB
+    // job shows nothing but that spam, with whatever chdman actually said about the failure
+    // pushed out of the window entirely. Keep only non-progress lines for the error message.
     let tail = "";
     const onChunk = (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
-      tail = (tail + text).slice(-2000);
       const match = text.match(PROGRESS_PATTERN);
       if (match) options.onProgress?.(parseFloat(match[1]), phase);
+
+      const meaningful = text
+        .split(/[\r\n]+/)
+        .filter((line) => line.trim() && !PROGRESS_PATTERN.test(line))
+        .join("\n");
+      if (meaningful) tail = (tail + "\n" + meaningful).slice(-4000);
     };
     child.stdout?.on("data", onChunk);
     child.stderr?.on("data", onChunk);
@@ -33,7 +42,8 @@ function run(chdmanPath: string, args: string[], phase: string, options: RunOpti
       } else if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`chdman exited with code ${code}: ${tail.trim()}`));
+        const detail = tail.trim() || "(chdman produced no output beyond progress updates — no further detail available)";
+        reject(new Error(`chdman exited with code ${code}: ${detail}`));
       }
     });
   });

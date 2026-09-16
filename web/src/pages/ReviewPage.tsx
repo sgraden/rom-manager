@@ -26,7 +26,7 @@ const ACTION_EXPLANATION: Record<ConvertAction, string> = {
   "chd-dvd": "DVD-based discs (PS2, PSP) — same CHD format, but chdman's DVD mode expects flat sector data with no CD track structure.",
   rvz: "GameCube/Wii, via DolphinTool. Falls back to a plain copy if DolphinTool isn't installed.",
   "keep-zip": "Cartridge ROMs — zipped (or re-zipped) since most emulator cores read zip archives directly.",
-  copy: "Computer disk images and arcade sets — copied as-is; recompressing would break the structure the emulator expects.",
+  copy: "Computer disk images, arcade sets, and Nintendo 3DS — copied as-is; recompressing would break the structure the emulator expects (or, for 3DS, isn't supported by any common emulator).",
 };
 
 /**

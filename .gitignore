@@ -7,6 +7,7 @@ dist/
 # runtime-generated, machine-specific — regenerated on first run
 config/config.json
 data/*.json
+data/*.jsonl
 staging/*
 !staging/.gitkeep
 

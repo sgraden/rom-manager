@@ -31,6 +31,10 @@ export const SYSTEMS: SystemDef[] = [
   { id: "gbc", name: "Game Boy Color", media: "cartridge", extensions: [".gbc"], folderAliases: ["gbc", "gameboycolor"], defaultAction: "keep-zip" },
   { id: "gba", name: "Game Boy Advance", media: "cartridge", extensions: [".gba"], folderAliases: ["gba", "gameboyadvance"], defaultAction: "keep-zip" },
   { id: "nds", name: "Nintendo DS", media: "cartridge", extensions: [".nds"], folderAliases: ["nds", "ds", "nintendods"], defaultAction: "keep-zip" },
+  // No lossless compression container is widely supported for 3DS the way CHD/RVZ are for
+  // disc systems — Citra and its forks (Lime3DS, Azahar) expect the raw .3ds/.cci/.cia file
+  // directly and don't read zip archives, so "copy" (not "keep-zip") is correct here.
+  { id: "3ds", name: "Nintendo 3DS", media: "cartridge", extensions: [".3ds", ".cci", ".cia"], folderAliases: ["3ds", "n3ds", "nintendo3ds"], defaultAction: "copy" },
   { id: "gamecube", name: "Nintendo GameCube", media: "disc", extensions: [".iso", ".gcm", ".rvz", ".chd"], folderAliases: ["gamecube", "gc", "ngc"], defaultAction: "rvz" },
   { id: "wii", name: "Nintendo Wii", media: "disc", extensions: [".iso", ".wbfs", ".rvz"], folderAliases: ["wii"], defaultAction: "rvz" },
 

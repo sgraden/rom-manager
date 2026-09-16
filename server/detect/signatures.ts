@@ -59,6 +59,14 @@ export function detectCartridgeSignatures(reader: ByteReader, ext: string): Dete
     candidates.push({ systemId: "nds", confidence: 0.9, evidence: "NDS Nintendo logo checksum 0xCF56 at offset 0x15C" });
   }
 
+  // 3DS: NCSD container magic "NCSD" at offset 0x100 (cartridge dumps — .3ds/.cci).
+  // .cia installable packages have no comparable fixed magic string, so those rely on
+  // the extension-only fallback below instead.
+  const ncsdMagic = reader.readAt(0x100, 4);
+  if (ncsdMagic && ncsdMagic.toString("ascii") === "NCSD") {
+    candidates.push({ systemId: "3ds", confidence: 0.9, evidence: "NCSD container magic at offset 0x100" });
+  }
+
   // Genesis / Mega Drive: "SEGA" ASCII marker at offset 0x100
   const genesisMarker = reader.readAt(0x100, 4);
   if (genesisMarker && genesisMarker.toString("ascii") === "SEGA") {

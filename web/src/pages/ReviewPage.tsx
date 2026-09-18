@@ -447,7 +447,9 @@ export function ReviewPage({
             <th>System</th>
             <th>Action</th>
             <th>Destination</th>
-            <th>Size before → est. after</th>
+            <th title="A rough guide based on typical results for this action, not a guarantee — CHD/RVZ compression depends heavily on how compressible the actual disc content is, and can end up larger than the original for content that's already compressed (FMV-heavy compilations especially).">
+              Size before → est. after
+            </th>
             <th>Warnings</th>
           </tr>
         </thead>

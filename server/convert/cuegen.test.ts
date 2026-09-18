@@ -1,8 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { generateCueForBin } from "./cuegen.js";
+import { detectTools } from "./tools.js";
 
 const dirs: string[] = [];
 function makeTempDir(): string {
@@ -13,6 +15,11 @@ function makeTempDir(): string {
 afterEach(() => {
   while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
+
+const tools = detectTools({ chdman: null, sevenZip: null, dolphinTool: null, maxcso: null });
+const chdman = tools.find((t) => t.id === "chdman");
+const chdmanPath = chdman?.found ? chdman.path : null;
+const maybeIt = chdmanPath ? it : it.skip;
 
 describe("generateCueForBin", () => {
   it("reads MODE1/2352 from the sector header when the size is a multiple of 2352", () => {
@@ -78,5 +85,38 @@ describe("generateCueForBin", () => {
     const expectedRelative = path.relative(result.tmpDir, binPath);
     expect(content).toContain(`FILE "${expectedRelative}" BINARY`);
     expect(content).toContain("MODE1/2048");
+  });
+
+  maybeIt("produces a cue chdman can actually use, even when the bin lives outside os.tmpdir()'s tree entirely", () => {
+    // Real bug: os.tmpdir() on macOS is under /var, itself a symlink to /private/var.
+    // path.relative() computed against its *logical* string undercounts the ".." needed
+    // by exactly the symlink's depth, since the OS resolves ".." against the *real*
+    // physical tree when chdman actually opens the file — it fails with "couldn't find
+    // bin file" for a path that's textually plausible but physically one level off. The
+    // sibling-tmpdir case above doesn't expose this: both sides share the same symlinked
+    // prefix, which cancels out. A bin file outside os.tmpdir() entirely does not.
+    const outsideDir = path.join(process.cwd(), ".cuegen-symlink-test-scratch");
+    mkdirSync(outsideDir, { recursive: true });
+    dirs.push(outsideDir);
+
+    const binPath = path.join(outsideDir, "track.bin");
+    const sectorSize = 2352;
+    const data = Buffer.alloc(5 * sectorSize);
+    for (let s = 0; s < 5; s++) {
+      const off = s * sectorSize;
+      data[off] = 0x00;
+      data.fill(0xff, off + 1, off + 11);
+      data[off + 11] = 0x00;
+      data[off + 15] = 0x01; // MODE1
+    }
+    writeFileSync(binPath, data);
+
+    const result = generateCueForBin(binPath, data.length);
+    dirs.push(result.tmpDir);
+
+    const chdPath = path.join(outsideDir, "out.chd");
+    const chdmanResult = spawnSync(chdmanPath!, ["createcd", "-i", result.cuePath, "-o", chdPath, "-f"], { encoding: "utf-8" });
+    expect(chdmanResult.status).toBe(0);
+    expect(existsSync(chdPath)).toBe(true);
   });
 });

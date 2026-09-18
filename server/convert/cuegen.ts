@@ -1,4 +1,4 @@
-import { openSync, readSync, closeSync, writeFileSync, mkdtempSync } from "node:fs";
+import { openSync, readSync, closeSync, writeFileSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -38,6 +38,15 @@ function readFirstBytes(filePath: string, length: number): Buffer {
  * double path. Since this generated .cue lives in its own fresh scratch
  * tmpDir rather than next to binPath, a plain basename won't reach it —
  * path.relative() is required.
+ *
+ * Both sides are realpath'd first: os.tmpdir() on macOS is under /var, which
+ * is itself a symlink to /private/var. path.relative() works on the literal
+ * string, so it undercounts the "../" needed by exactly the symlink's depth
+ * — the OS resolves ".." against the real physical tree when chdman actually
+ * opens the file, landing one directory short of where the string points and
+ * failing with "couldn't find bin file". Confirmed against a real chdman run
+ * with the tmpDir's logical vs. real path: only the realpath'd version reaches
+ * the file the traversal is actually supposed to land on.
  */
 export function generateCueForBin(binPath: string, binSizeBytes: number): CueGenResult {
   let mode: string;
@@ -63,7 +72,7 @@ export function generateCueForBin(binPath: string, binSizeBytes: number): CueGen
 
   const tmpDir = mkdtempSync(path.join(tmpdir(), "rom-manager-cuegen-"));
   const cuePath = path.join(tmpDir, "generated.cue");
-  const relativeBinPath = path.relative(tmpDir, binPath);
+  const relativeBinPath = path.relative(realpathSync(tmpDir), realpathSync(binPath));
   const cueContent = `FILE "${relativeBinPath}" BINARY\n  TRACK 01 ${mode}\n    INDEX 01 00:00:00\n`;
   writeFileSync(cuePath, cueContent, "utf-8");
 

@@ -32,6 +32,29 @@ export function estimateOutputBytes(sourceBytes: number, action: ConvertAction):
   return Math.round(sourceBytes * ACTION_SIZE_MULTIPLIER[action]);
 }
 
+/**
+ * A conservative upper bound for free-space checks specifically — never shown to the user
+ * as "the estimate", only used to decide whether a job is safe to start. CHD/RVZ compression
+ * is highly content-dependent: a disc that's mostly already-compressed video/audio (FMV-heavy
+ * compilations especially) can compress poorly or even come out slightly *larger* than the
+ * source, since every hunk still carries its own checksum/metadata overhead regardless of
+ * whether the underlying bytes actually shrank (observed as high as ~104% of source in
+ * practice). The typical multiplier above isn't safe to gate available space against — this
+ * one assumes near-zero savings instead, with headroom above that one real data point. copy
+ * is always exactly 1:1 already; keep-zip's zip overhead on small cartridge ROMs is negligible
+ * in absolute terms, so neither needs adjusting here.
+ */
+const WORST_CASE_MULTIPLIER: Partial<Record<ConvertAction, number>> = {
+  "chd-cd": 1.1,
+  "chd-dvd": 1.1,
+  rvz: 1.1,
+};
+
+export function estimateWorstCaseBytes(sourceBytes: number, action: ConvertAction): number {
+  const multiplier = WORST_CASE_MULTIPLIER[action] ?? ACTION_SIZE_MULTIPLIER[action];
+  return Math.round(sourceBytes * multiplier);
+}
+
 /** True if `candidate` is `dir` itself or something inside it. */
 export function isPathInside(candidate: string, dir: string): boolean {
   const rel = path.relative(dir, candidate);

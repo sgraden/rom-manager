@@ -146,7 +146,7 @@ describe("buildPlan", () => {
     expect(job.warnings.some((w) => w.text.includes("already exists"))).toBe(true);
   });
 
-  it("warns when estimated output exceeds free space", () => {
+  it("warns when the worst-case output exceeds free space", () => {
     const root = makeTempDir();
     const romRoot = path.join(root, "roms");
     mkdirSync(path.join(romRoot, "nes"), { recursive: true });
@@ -164,7 +164,55 @@ describe("buildPlan", () => {
     };
 
     const [job] = buildPlan([romPath], target, fakeConfig(), { sevenZipPath: null });
-    expect(job.warnings.some((w) => w.text.includes("exceeds free space"))).toBe(true);
+    expect(job.warnings.some((w) => w.text.includes("free on TESTCARD"))).toBe(true);
+  });
+
+  it("blocks on the worst-case estimate even when the typical estimate would fit, for compression-heavy disc actions", () => {
+    // 100 * 2048 sector-aligned "DVD" data, so this legitimately resolves to ps2/chd-dvd.
+    const root = makeTempDir();
+    const romRoot = path.join(root, "roms");
+    mkdirSync(path.join(romRoot, "ps2"), { recursive: true });
+    const isoPath = path.join(root, "Big Game (USA).iso");
+    writeFileSync(isoPath, Buffer.alloc(100 * 2048));
+    const sourceBytes = 100 * 2048;
+
+    const target: TargetInfo = {
+      name: "TESTCARD",
+      path: root,
+      romRoot,
+      // Comfortably above the optimistic chd-dvd estimate (65% of source) but below the
+      // conservative worst-case one (110% of source) — this must still warn.
+      freeBytes: Math.round(sourceBytes * 0.8),
+      totalBytes: 1_000_000_000,
+      fsType: "exfat",
+      writable: true,
+      folders: ["ps2"],
+    };
+
+    const [job] = buildPlan([isoPath], target, fakeConfig(), { sevenZipPath: null }, { [isoPath]: { systemId: "ps2", action: "chd-dvd" } });
+    expect(job.warnings.some((w) => w.text.includes("in the worst case"))).toBe(true);
+  });
+
+  it("does not warn when even the worst-case estimate comfortably fits", () => {
+    const root = makeTempDir();
+    const romRoot = path.join(root, "roms");
+    mkdirSync(path.join(romRoot, "ps2"), { recursive: true });
+    const isoPath = path.join(root, "Small Game (USA).iso");
+    writeFileSync(isoPath, Buffer.alloc(100 * 2048));
+
+    const target: TargetInfo = {
+      name: "TESTCARD",
+      path: root,
+      romRoot,
+      freeBytes: 1_000_000_000,
+      totalBytes: 2_000_000_000,
+      fsType: "exfat",
+      writable: true,
+      folders: ["ps2"],
+    };
+
+    const [job] = buildPlan([isoPath], target, fakeConfig(), { sevenZipPath: null }, { [isoPath]: { systemId: "ps2", action: "chd-dvd" } });
+    expect(job.warnings.some((w) => w.text.includes("in the worst case"))).toBe(false);
   });
 
   it("applies a manual system/action override and clears the low-confidence warning", () => {

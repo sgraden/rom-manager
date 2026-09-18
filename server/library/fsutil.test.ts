@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor, isPathInside } from "./fsutil.js";
+import { sanitizeExfatName, estimateOutputBytes, estimateWorstCaseBytes, outputFilenameFor, isPathInside } from "./fsutil.js";
 
 describe("sanitizeExfatName", () => {
   it("leaves an already-safe name untouched", () => {
@@ -34,6 +34,23 @@ describe("estimateOutputBytes", () => {
 
   it("leaves 'copy' output equal to the source", () => {
     expect(estimateOutputBytes(1234, "copy")).toBe(1234);
+  });
+});
+
+describe("estimateWorstCaseBytes", () => {
+  it("assumes near-zero savings for CHD/RVZ, unlike the optimistic typical-case estimate", () => {
+    // A disc that's mostly already-compressed content (FMV-heavy compilations especially)
+    // can compress poorly or even end up larger than the source — observed as high as ~104%
+    // of source in practice — so the free-space check can't safely assume the typical savings.
+    const worstCase = estimateWorstCaseBytes(1_000_000, "chd-dvd");
+    const typical = estimateOutputBytes(1_000_000, "chd-dvd");
+    expect(worstCase).toBeGreaterThan(typical);
+    expect(worstCase).toBeGreaterThan(1_000_000); // headroom above simple break-even
+  });
+
+  it("leaves 'copy' and 'keep-zip' at the same figure as the typical-case estimate", () => {
+    expect(estimateWorstCaseBytes(1234, "copy")).toBe(estimateOutputBytes(1234, "copy"));
+    expect(estimateWorstCaseBytes(1234, "keep-zip")).toBe(estimateOutputBytes(1234, "keep-zip"));
   });
 });
 

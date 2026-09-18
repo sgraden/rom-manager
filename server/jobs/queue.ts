@@ -27,7 +27,7 @@ import { CancelledError } from "../convert/errors.js";
 import { groupForM3u, m3uFilenameFor, m3uContent } from "../convert/m3u.js";
 import { parseCueFile, parseGdiFile, resolveCcdCompanions } from "../detect/cuesheet.js";
 import { getFreeBytes } from "../library/targets.js";
-import { isPathInside, estimateOutputBytes } from "../library/fsutil.js";
+import { isPathInside, estimateOutputBytes, estimateWorstCaseBytes } from "../library/fsutil.js";
 import { threadsPerJob } from "../library/cpuBudget.js";
 import { hashFile, hashArchiveEntry, type FileHashes } from "../library/hash.js";
 import { appendLibraryRecord } from "../library/libraryLog.js";
@@ -400,13 +400,17 @@ export class JobQueue extends EventEmitter {
       // reports "unknown" for a path that doesn't exist yet rather than actually failing.
       mkdirSync(job.destinationFolder, { recursive: true });
 
-      // With concurrency > 1, a free-space check in isolation could pass for
-      // several jobs that collectively overrun the card, since none of them
-      // know about the others' in-flight writes. Account for bytes already
-      // reserved by other currently-running jobs before deciding this one fits.
-      // This whole block is synchronous (no `await`), so it can't race with
+      // estimatedBytes (the optimistic, typical-case figure) feeds the progress bar below —
+      // it should track what a normal conversion actually looks like, not a safety margin.
+      // The free-space gate needs the opposite bias: CHD/RVZ compression is content-dependent
+      // enough that the typical figure isn't safe to admit a job against (see
+      // estimateWorstCaseBytes), so reservation/admission uses that conservative figure
+      // instead — including what's reserved for other concurrent jobs, so several jobs
+      // started together can't collectively overrun the card even if each one looked fine
+      // in isolation. This whole block is synchronous (no `await`), so it can't race with
       // another job's runJob() — Node won't interleave them mid-check.
       const estimatedBytes = estimateOutputBytes(job.sourceBytes, job.action);
+      const worstCaseBytes = estimateWorstCaseBytes(job.sourceBytes, job.action);
       const freeBytes = getFreeBytes(job.destinationFolder);
       if (freeBytes !== null) {
         let reservedByOthers = 0;
@@ -414,13 +418,13 @@ export class JobQueue extends EventEmitter {
           if (otherId !== id) reservedByOthers += bytes;
         }
         const effectiveFree = freeBytes - reservedByOthers;
-        if (effectiveFree < estimatedBytes + 5 * 1024 * 1024) {
+        if (effectiveFree < worstCaseBytes + 5 * 1024 * 1024) {
           throw new Error(
-            `Not enough free space for this job (~${Math.round(estimatedBytes / 1024 / 1024)} MB estimated, ~${Math.round(effectiveFree / 1024 / 1024)} MB available once other running jobs are accounted for).`,
+            `Not enough free space for this job (up to ~${Math.round(worstCaseBytes / 1024 / 1024)} MB needed in the worst case, ~${Math.round(effectiveFree / 1024 / 1024)} MB available once other running jobs are accounted for).`,
           );
         }
       }
-      this.reservedBytes.set(id, estimatedBytes);
+      this.reservedBytes.set(id, worstCaseBytes);
 
       const tools = this.getTools();
       const registerProcess = (child: ChildProcess) => this.processes.set(id, child);

@@ -4,7 +4,7 @@ import { detectPath, type DetectOptions } from "../detect/index.js";
 import type { DetectionCandidate, DetectionResult } from "../detect/types.js";
 import { getSystem, type ConvertAction } from "./systems.js";
 import { resolveFolderMap, type TargetInfo } from "./targets.js";
-import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor } from "./fsutil.js";
+import { sanitizeExfatName, estimateOutputBytes, estimateWorstCaseBytes, outputFilenameFor } from "./fsutil.js";
 import { parseDiscToken } from "./discGroup.js";
 import type { AppConfig } from "./config.js";
 
@@ -283,10 +283,16 @@ function buildOne(
       }
     }
 
-    if (target.freeBytes !== null && estimatedOutputBytes > target.freeBytes) {
+    // Gated against the conservative worst-case figure, not the optimistic typical-case
+    // estimate shown above: CHD/RVZ compression is content-dependent enough (see
+    // estimateWorstCaseBytes) that a job passing this on the optimistic number could still
+    // fail for real once queue.ts applies that same conservative check at process time —
+    // better to warn about that possibility here than have it surface as a mid-batch failure.
+    const worstCaseBytes = estimateWorstCaseBytes(sourceBytes, action);
+    if (target.freeBytes !== null && worstCaseBytes > target.freeBytes) {
       warn(
         "blocker",
-        `Estimated output (~${Math.round(estimatedOutputBytes / 1024 / 1024)} MB) exceeds free space on ${target.name} (${Math.round(target.freeBytes / 1024 / 1024)} MB).`,
+        `Could need up to ~${Math.round(worstCaseBytes / 1024 / 1024)} MB in the worst case (typically closer to ~${Math.round(estimatedOutputBytes / 1024 / 1024)} MB) — only ${Math.round(target.freeBytes / 1024 / 1024)} MB free on ${target.name}.`,
       );
     }
   }

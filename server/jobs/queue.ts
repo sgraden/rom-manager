@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   mkdtempSync,
+  mkdirSync,
   rmSync,
   existsSync,
   statSync,
@@ -391,6 +392,13 @@ export class JobQueue extends EventEmitter {
       if (existsSync(job.destinationPath) && !job.replace) {
         throw new Error(`A file already exists at ${job.destinationPath} — remove or rename it first.`);
       }
+
+      // The plain system folder is already there (created via Settings' "Create folder"
+      // before it could ever be mapped), but a multi-disc set's own subfolder is a path
+      // plan.ts invents on the fly and nothing has created yet — recursive so it's also a
+      // no-op for the ordinary case. Done before the free-space check below, which silently
+      // reports "unknown" for a path that doesn't exist yet rather than actually failing.
+      mkdirSync(job.destinationFolder, { recursive: true });
 
       // With concurrency > 1, a free-space check in isolation could pass for
       // several jobs that collectively overrun the card, since none of them

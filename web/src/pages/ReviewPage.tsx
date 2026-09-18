@@ -466,7 +466,6 @@ export function ReviewPage({
                     : job.warnings.some((w) => w.level === "warning")
                       ? "plan-row-warn"
                       : "",
-                  isGrouped ? "disc-group-row" : "",
                   isGroupFirst ? "disc-group-first" : "",
                   isGroupLast ? "disc-group-last" : "",
                 ]

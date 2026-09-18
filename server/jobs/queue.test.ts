@@ -1258,6 +1258,40 @@ describe("JobQueue (real chdman/7zz, scratch directory only)", () => {
     expect(readFileSync(destPath, "utf-8")).toBe("not a real zip, just bytes for the copy path");
   });
 
+  maybeIt("creates a multi-disc set's own subfolder before writing into it, since plan.ts invents that path on the fly", async () => {
+    const srcDir = makeTempDir();
+    const destDir = makeTempDir();
+    mkdirSync(path.join(destDir, "psx")); // the system folder exists; the multi-disc subfolder inside it does not
+
+    const romPath = path.join(srcDir, "Final Fantasy IX (Disc 1).bin");
+    writeFileSync(romPath, "not a real disc, just bytes for the copy path");
+
+    const queue = new JobQueue(
+      () => 1,
+      () => true,
+      () => toolPaths,
+    );
+
+    const destinationFolder = path.join(destDir, "psx", "Final Fantasy IX (Rev 1)");
+    expect(existsSync(destinationFolder)).toBe(false);
+
+    const job = queue.enqueue(
+      fakePlannedJob({
+        sourcePath: romPath,
+        selectedSystemId: "psx",
+        action: "copy",
+        destinationFolder,
+        destinationFilename: "Final Fantasy IX (Disc 1).bin",
+      }),
+    );
+
+    const finished = await waitForTerminal(queue, job.id);
+    expect(finished?.state).toBe("done");
+    expect(finished?.error).toBeNull();
+    const destPath = path.join(destinationFolder, "Final Fantasy IX (Disc 1).bin");
+    expect(readFileSync(destPath, "utf-8")).toBe("not a real disc, just bytes for the copy path");
+  });
+
   maybeIt("fails without touching the destination when a file already exists there", async () => {
     const srcDir = makeTempDir();
     const destDir = makeTempDir();

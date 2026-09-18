@@ -364,12 +364,9 @@ input[type="text"] {
   background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
-/* A left accent marks rows belonging to the same multi-disc set, bracketed top/bottom so
-   the set reads as one connected block rather than independently-bordered rows. */
-.disc-group-row td:first-child {
-  border-left: 3px solid color-mix(in srgb, var(--warn) 60%, var(--border));
-}
-
+/* A multi-disc set's rows are bracketed top/bottom with a plain divider so the set reads as
+   one connected block; the "Disc N/M" badge (below) carries the actual identification, so
+   this stays a neutral structural cue rather than a colored accent competing for attention. */
 .disc-group-first td {
   border-top: 1px solid var(--border);
 }

@@ -23,6 +23,7 @@ function fakeConfig(): AppConfig {
     reservedCpuCores: 2,
     verifyAfterConvert: true,
     deleteSourceAfterSuccess: false,
+    groupMultiDiscFolders: true,
     additionalTargetPaths: [],
     toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
     targetFolderMaps: {},

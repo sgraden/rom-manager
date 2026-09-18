@@ -20,6 +20,8 @@ export interface AppConfig {
   reservedCpuCores: number;
   verifyAfterConvert: boolean;
   deleteSourceAfterSuccess: boolean;
+  /** Multi-disc sets (matched by a "(Disc N)"-style filename token) get their own subfolder, .m3u included, instead of sitting flat in the system folder. */
+  groupMultiDiscFolders: boolean;
   additionalTargetPaths: string[];
   toolPathOverrides: ToolPathOverrides;
   targetFolderMaps: Record<string, { romRoot: string; folderMap: Record<string, string> }>;
@@ -41,6 +43,7 @@ const DEFAULTS: AppConfig = {
   reservedCpuCores: 2,
   verifyAfterConvert: true,
   deleteSourceAfterSuccess: false,
+  groupMultiDiscFolders: true,
   additionalTargetPaths: [],
   toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
   targetFolderMaps: {},

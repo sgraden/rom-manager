@@ -347,8 +347,46 @@ input[type="text"] {
   padding: 10px 14px;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.checkbox-row input[type="checkbox"] {
+  cursor: pointer;
+}
+
 .plan-row-warn {
   background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* A left accent marks rows belonging to the same multi-disc set, bracketed top/bottom so
+   the set reads as one connected block rather than independently-bordered rows. */
+.disc-group-row td:first-child {
+  border-left: 3px solid color-mix(in srgb, var(--warn) 60%, var(--border));
+}
+
+.disc-group-first td {
+  border-top: 1px solid var(--border);
+}
+
+.disc-group-last td {
+  border-bottom: 1px solid var(--border);
+}
+
+.disc-group-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--bg-subtle);
+  opacity: 0.75;
+  white-space: nowrap;
 }
 
 .evidence {

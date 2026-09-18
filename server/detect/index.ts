@@ -163,11 +163,22 @@ function detectCueLike(cuePath: string, ext: string): DetectionResult {
       ? [`Referenced track file(s) missing: ${discSet.missingTrackFiles.map((f) => path.basename(f)).join(", ")}`]
       : undefined;
 
+    // cuePath itself is a tiny text file — the real content size is its track file(s), which
+    // is what size estimates, free-space checks, and CD/DVD sector-alignment all actually need.
+    const contentBytes = discSet.trackFiles.reduce((sum, trackFile) => {
+      try {
+        return sum + statSync(trackFile).size;
+      } catch {
+        return sum;
+      }
+    }, 0);
+
     return {
       kind: "disc",
       candidates: rankByConfidence(candidates),
       warnings,
       relatedFiles: discSet.trackFiles,
+      contentBytes,
     };
   } finally {
     reader.close();
@@ -248,6 +259,9 @@ function detectArchive(archivePath: string, options: DetectOptions): DetectionRe
 
     // Uncached: targetPath is a scratch file that is deleted moments from now, so caching
     // it would only fill the cache with keys that can never be hit again.
+    // For a cue set, targetPath is the .cue itself (a tiny text file) — detectCueLike already
+    // computes the real content size from its track files, and wrap() prefers that when
+    // present; the statSync fallback here only matters for a lone (non-cue) extracted entry.
     return wrap(detectPathUncached(targetPath, options), statSync(targetPath).size);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

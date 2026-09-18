@@ -65,6 +65,10 @@ export interface PlannedJob {
   estimatedOutputBytes: number | null;
   warnings: PlanWarning[];
   replace: boolean;
+  /** Multi-disc set identity shared by every disc of the same game, null otherwise — see discGroupKey on the server. */
+  discGroupKey: string | null;
+  discGroupIndex: number | null;
+  discGroupTotal: number | null;
 }
 
 export interface FolderMapResult {
@@ -222,6 +226,7 @@ export interface PerformanceConfig {
   reservedCpuCores: number;
   verifyAfterConvert: boolean;
   deleteSourceAfterSuccess: boolean;
+  groupMultiDiscFolders: boolean;
   cpuCoreCount: number;
 }
 

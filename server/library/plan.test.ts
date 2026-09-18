@@ -24,6 +24,7 @@ function fakeConfig(): AppConfig {
     reservedCpuCores: 2,
     verifyAfterConvert: true,
     deleteSourceAfterSuccess: false,
+    groupMultiDiscFolders: true,
     additionalTargetPaths: [],
     toolPathOverrides: { chdman: null, sevenZip: null, dolphinTool: null, maxcso: null },
     targetFolderMaps: {},
@@ -387,5 +388,95 @@ describe("buildPlan", () => {
     const corrected = job.warnings.find((w) => w.text.includes("CD-mode PS2 dump"));
     // The app already handled it; it's a note about a decision, not a problem.
     expect(corrected?.level).toBe("info");
+  });
+
+  describe("multi-disc grouping", () => {
+    function discTarget(root: string, romRoot: string): TargetInfo {
+      return {
+        name: "TESTCARD",
+        path: root,
+        romRoot,
+        freeBytes: 10_000_000_000,
+        totalBytes: 20_000_000_000,
+        fsType: "exfat",
+        writable: true,
+        folders: ["psx"],
+      };
+    }
+
+    it("groups a multi-disc set into its own subfolder when enabled (the default)", () => {
+      const root = makeTempDir();
+      const romRoot = path.join(root, "roms");
+      mkdirSync(path.join(romRoot, "psx"), { recursive: true });
+      const disc1 = path.join(root, "Final Fantasy IX (Disc 1).bin");
+      const disc2 = path.join(root, "Final Fantasy IX (Disc 2).bin");
+      writeFileSync(disc1, Buffer.alloc(16));
+      writeFileSync(disc2, Buffer.alloc(16));
+
+      const overrides = {
+        [disc1]: { systemId: "psx", action: "chd-cd" as const },
+        [disc2]: { systemId: "psx", action: "chd-cd" as const },
+      };
+      const [job1, job2] = buildPlan([disc1, disc2], discTarget(root, romRoot), fakeConfig(), { sevenZipPath: null }, overrides);
+
+      const expectedFolder = path.join(romRoot, "psx", "Final Fantasy IX");
+      expect(job1.destinationFolder).toBe(expectedFolder);
+      expect(job2.destinationFolder).toBe(expectedFolder);
+      expect(job1.discGroupKey).not.toBeNull();
+      expect(job1.discGroupKey).toBe(job2.discGroupKey);
+      expect(job1.discGroupIndex).toBe(1);
+      expect(job2.discGroupIndex).toBe(2);
+      expect(job1.discGroupTotal).toBe(2);
+      expect(job2.discGroupTotal).toBe(2);
+      // The individual filename keeps its full, disc-specific name — only the folder changes.
+      expect(job1.destinationFilename).toBe("Final Fantasy IX (Disc 1).chd");
+    });
+
+    it("still reports discGroupKey/Index/Total for visual grouping even when the subfolder is switched off", () => {
+      const root = makeTempDir();
+      const romRoot = path.join(root, "roms");
+      mkdirSync(path.join(romRoot, "psx"), { recursive: true });
+      const disc1 = path.join(root, "Final Fantasy IX (Disc 1).bin");
+      const disc2 = path.join(root, "Final Fantasy IX (Disc 2).bin");
+      writeFileSync(disc1, Buffer.alloc(16));
+      writeFileSync(disc2, Buffer.alloc(16));
+
+      const overrides = {
+        [disc1]: { systemId: "psx", action: "chd-cd" as const },
+        [disc2]: { systemId: "psx", action: "chd-cd" as const },
+      };
+      const [job1, job2] = buildPlan(
+        [disc1, disc2],
+        discTarget(root, romRoot),
+        { ...fakeConfig(), groupMultiDiscFolders: false },
+        { sevenZipPath: null },
+        overrides,
+      );
+
+      const flatFolder = path.join(romRoot, "psx");
+      expect(job1.destinationFolder).toBe(flatFolder);
+      expect(job2.destinationFolder).toBe(flatFolder);
+      expect(job1.discGroupKey).not.toBeNull();
+      expect(job1.discGroupKey).toBe(job2.discGroupKey);
+    });
+
+    it("does not treat a lone disc with no sibling in the batch as a set", () => {
+      const root = makeTempDir();
+      const romRoot = path.join(root, "roms");
+      mkdirSync(path.join(romRoot, "psx"), { recursive: true });
+      const disc1 = path.join(root, "Solo Game (Disc 1).bin");
+      writeFileSync(disc1, Buffer.alloc(16));
+
+      const [job] = buildPlan(
+        [disc1],
+        discTarget(root, romRoot),
+        fakeConfig(),
+        { sevenZipPath: null },
+        { [disc1]: { systemId: "psx", action: "chd-cd" } },
+      );
+
+      expect(job.discGroupKey).toBeNull();
+      expect(job.destinationFolder).toBe(path.join(romRoot, "psx"));
+    });
   });
 });

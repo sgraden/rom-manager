@@ -155,6 +155,9 @@ function fakePlannedJob(overrides: Partial<PlannedJob> & { sourcePath: string })
     warnings: [],
     replace: false,
     replacesPath: null,
+    discGroupKey: null,
+    discGroupIndex: null,
+    discGroupTotal: null,
     ...overrides,
   };
 }

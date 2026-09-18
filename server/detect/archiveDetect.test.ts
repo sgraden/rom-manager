@@ -90,6 +90,21 @@ describe("archive detection", () => {
     const result = detectPath(archivePath, { sevenZipPath });
     expect(result.kind).toBe("disc");
     expect(result.candidates[0].systemId).toBe("saturn");
+    // contentBytes must be the referenced .bin's real size, not the tiny .cue text file's —
+    // using the latter previously produced absurd displayed sizes like "113 B -> 411.8 MB".
+    expect(result.contentBytes).toBe(20 * sectorSize);
+  });
+
+  it("reports a bare (non-archived) .cue's real track size, not the tiny .cue text file's own size", () => {
+    const dir = makeTempDir();
+    const name = "Bare Cue Game";
+    const binPath = path.join(dir, `${name}.bin`);
+    writeFileSync(binPath, Buffer.alloc(20 * 2352));
+    const cuePath = path.join(dir, `${name}.cue`);
+    writeFileSync(cuePath, `FILE "${name}.bin" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n`);
+
+    const result = detectPath(cuePath, { sevenZipPath: null });
+    expect(result.contentBytes).toBe(20 * 2352);
   });
 
   maybeIt("caches by content identity, and re-detects once the file changes", () => {

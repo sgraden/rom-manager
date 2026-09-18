@@ -11,6 +11,7 @@ describe("withDefaults", () => {
     expect(config.reservedCpuCores).toBe(2);
     expect(config.verifyAfterConvert).toBe(true);
     expect(config.deleteSourceAfterSuccess).toBe(false);
+    expect(config.groupMultiDiscFolders).toBe(true);
     expect(config.additionalTargetPaths).toEqual([]);
     // The specific field that used to throw: resolveFolderMap indexes into this unguarded.
     expect(config.targetFolderMaps).toEqual({});
@@ -58,6 +59,7 @@ describe("withDefaults", () => {
       "reservedCpuCores",
       "verifyAfterConvert",
       "deleteSourceAfterSuccess",
+      "groupMultiDiscFolders",
       "additionalTargetPaths",
       "toolPathOverrides",
       "targetFolderMaps",

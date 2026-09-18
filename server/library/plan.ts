@@ -5,6 +5,7 @@ import type { DetectionCandidate, DetectionResult } from "../detect/types.js";
 import { getSystem, type ConvertAction } from "./systems.js";
 import { resolveFolderMap, type TargetInfo } from "./targets.js";
 import { sanitizeExfatName, estimateOutputBytes, outputFilenameFor } from "./fsutil.js";
+import { parseDiscToken } from "./discGroup.js";
 import type { AppConfig } from "./config.js";
 
 export interface PlanOverride {
@@ -95,6 +96,57 @@ export interface PlannedJob {
    * names a file that will be deleted.
    */
   replacesPath: string | null;
+  /**
+   * Multi-disc set identity — shared by every disc of the same game (matched by a
+   * "(Disc N)"-style token in the filename), null for anything else. Populated
+   * regardless of groupMultiDiscFolders, so the Review page can visually cluster and
+   * link overrides across a set's rows even when the subfolder itself is switched off.
+   */
+  discGroupKey: string | null;
+  discGroupIndex: number | null;
+  discGroupTotal: number | null;
+}
+
+interface DiscGroupInfo {
+  key: string;
+  /** The set's shared name with its disc token and extension stripped — used as the subfolder name. */
+  folderName: string;
+  discNum: number;
+  total: number;
+}
+
+/**
+ * Groups sourcePaths into multi-disc sets: same resolved system, same filename with its
+ * "(Disc N)" token stripped. Only systems whose media is "disc" are eligible — cartridge/
+ * arcade/computer systems don't ship as numbered discs, and treating a coincidental "(Disc"
+ * substring in an unrelated cartridge filename as a set would be a false grouping, not a
+ * helpful one. A "set" of one (no sibling actually resolved to the same system) isn't a set.
+ */
+function computeDiscGroups(entries: { sourcePath: string; sourceName: string; selectedSystemId: string | null }[]): Map<string, DiscGroupInfo> {
+  const groups = new Map<string, { folderName: string; members: { sourcePath: string; discNum: number }[] }>();
+
+  for (const entry of entries) {
+    if (!entry.selectedSystemId) continue;
+    const system = getSystem(entry.selectedSystemId);
+    if (!system || system.media !== "disc") continue;
+    const token = parseDiscToken(entry.sourceName);
+    if (!token) continue;
+
+    const folderName = token.baseName.replace(/\.[^./]+$/, "");
+    const key = `${entry.selectedSystemId}::${token.baseName}`;
+    const group = groups.get(key) ?? { folderName, members: [] };
+    group.members.push({ sourcePath: entry.sourcePath, discNum: token.discNum });
+    groups.set(key, group);
+  }
+
+  const bySourcePath = new Map<string, DiscGroupInfo>();
+  for (const [key, group] of groups) {
+    if (group.members.length < 2) continue;
+    for (const member of group.members) {
+      bySourcePath.set(member.sourcePath, { key, folderName: group.folderName, discNum: member.discNum, total: group.members.length });
+    }
+  }
+  return bySourcePath;
 }
 
 const LEVEL_ORDER: Record<WarningLevel, number> = { blocker: 0, warning: 1, info: 2 };
@@ -112,7 +164,28 @@ export function buildPlan(
   overrides: Record<string, PlanOverride> = {},
 ): PlannedJob[] {
   const { folderMap } = resolveFolderMap(target, config);
-  return sourcePaths.map((sourcePath) => buildOne(sourcePath, target, folderMap, options, overrides[sourcePath]));
+
+  // A multi-disc set's destination folder depends on whether its siblings are present in this
+  // same batch, so that has to be known before any individual job's destination is resolved —
+  // hence this lightweight pre-pass. detectPath is cached, so re-running it inside buildOne
+  // below hits that cache rather than redoing real detection work.
+  const prelim = sourcePaths.map((sourcePath) => {
+    const override = overrides[sourcePath];
+    let selectedSystemId: string | null = override?.systemId ?? null;
+    if (!selectedSystemId) {
+      try {
+        selectedSystemId = detectPath(sourcePath, options).candidates[0]?.systemId ?? null;
+      } catch {
+        selectedSystemId = null;
+      }
+    }
+    return { sourcePath, sourceName: path.basename(sourcePath), selectedSystemId };
+  });
+  const discGroups = computeDiscGroups(prelim);
+
+  return sourcePaths.map((sourcePath) =>
+    buildOne(sourcePath, target, folderMap, options, overrides[sourcePath], discGroups.get(sourcePath) ?? null, config.groupMultiDiscFolders),
+  );
 }
 
 function buildOne(
@@ -120,7 +193,9 @@ function buildOne(
   target: TargetInfo,
   folderMap: Record<string, string>,
   options: DetectOptions,
-  override?: PlanOverride,
+  override: PlanOverride | undefined,
+  discGroup: DiscGroupInfo | null,
+  useDiscSubfolders: boolean,
 ): PlannedJob {
   const warnings: PlanWarning[] = [];
   const warn = (level: WarningLevel, text: string) => warnings.push({ level, text });
@@ -193,6 +268,9 @@ function buildOne(
       warn("blocker", `No destination folder mapped for ${system?.name ?? selectedSystemId} on ${target.name} — assign one in Settings.`);
     } else {
       destinationFolder = path.join(target.romRoot, folderName);
+      if (discGroup && useDiscSubfolders) {
+        destinationFolder = path.join(destinationFolder, sanitizeExfatName(discGroup.folderName));
+      }
     }
 
     destinationFilename = outputFilenameFor(sourceName, action);
@@ -231,5 +309,8 @@ function buildOne(
     warnings: sortByLevel(warnings),
     replace: override?.replace ?? false,
     replacesPath: null,
+    discGroupKey: discGroup?.key ?? null,
+    discGroupIndex: discGroup?.discNum ?? null,
+    discGroupTotal: discGroup?.total ?? null,
   };
 }

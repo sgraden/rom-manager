@@ -1,5 +1,4 @@
-// Matches a disc-number token like "(Disc 1)", "[Disk 2]", "(CD 3)" anywhere in a filename.
-const DISC_TOKEN = /\s*[[(]\s*(?:disc|disk|cd)\s*(\d+)\s*[)\]]/i;
+import { parseDiscToken } from "../library/discGroup.js";
 
 export interface OutputFile {
   folder: string;
@@ -16,20 +15,17 @@ export function groupForM3u(files: OutputFile[]): Map<string, M3uGroup> {
   const groups = new Map<string, M3uGroup>();
 
   for (const file of files) {
-    const match = file.filename.match(DISC_TOKEN);
-    if (!match) continue;
+    const token = parseDiscToken(file.filename);
+    if (!token) continue;
 
-    const baseName = file.filename.replace(DISC_TOKEN, "").trim();
-    const key = `${file.folder}::${baseName}`;
-    const discNum = parseInt(match[1], 10);
-
+    const key = `${file.folder}::${token.baseName}`;
     const existing = groups.get(key);
     if (existing) {
       if (!existing.discs.some((d) => d.filename === file.filename)) {
-        existing.discs.push({ num: discNum, filename: file.filename });
+        existing.discs.push({ num: token.discNum, filename: file.filename });
       }
     } else {
-      groups.set(key, { folder: file.folder, discs: [{ num: discNum, filename: file.filename }] });
+      groups.set(key, { folder: file.folder, discs: [{ num: token.discNum, filename: file.filename }] });
     }
   }
 

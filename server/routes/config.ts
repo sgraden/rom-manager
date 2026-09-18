@@ -12,6 +12,7 @@ function editableSlice(config: ReturnType<typeof loadConfig>) {
     reservedCpuCores: config.reservedCpuCores,
     verifyAfterConvert: config.verifyAfterConvert,
     deleteSourceAfterSuccess: config.deleteSourceAfterSuccess,
+    groupMultiDiscFolders: config.groupMultiDiscFolders,
   };
 }
 
@@ -53,6 +54,14 @@ configRouter.put("/", (req, res) => {
       return;
     }
     config.deleteSourceAfterSuccess = body.deleteSourceAfterSuccess;
+  }
+
+  if (body.groupMultiDiscFolders !== undefined) {
+    if (typeof body.groupMultiDiscFolders !== "boolean") {
+      res.status(400).json({ error: "groupMultiDiscFolders must be a boolean." });
+      return;
+    }
+    config.groupMultiDiscFolders = body.groupMultiDiscFolders;
   }
 
   saveConfig(config);

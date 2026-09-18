@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchSystems,
   planJobs,
   submitJobs,
   createFolder,
   fetchDuplicateMatches,
+  fetchPerformanceConfig,
+  setPerformanceConfig,
   type SystemDef,
   type PlannedJob,
   type ConvertAction,
@@ -20,6 +22,16 @@ import { ActionBar } from "../ActionBar";
 import { formatBytes, formatDate } from "../format";
 
 const ACTIONS: ConvertAction[] = ["chd-cd", "chd-dvd", "rvz", "keep-zip", "copy"];
+
+// Mirrors server/library/discGroup.ts's DISC_TOKEN — duplicated because this needs to run
+// before the server has confirmed a group (see propagationSourcePaths below), not after.
+const DISC_TOKEN = /\s*[[(]\s*(?:disc|disk|cd)\s*(\d+)\s*[)\]]/i;
+
+/** The filename with its disc-number token stripped — the shared identity across a set's discs, independent of whether the server has agreed on a system for them yet. */
+function discBaseName(filename: string): string | null {
+  const match = filename.match(DISC_TOKEN);
+  return match ? filename.replace(DISC_TOKEN, "").trim() : null;
+}
 
 const ACTION_EXPLANATION: Record<ConvertAction, string> = {
   "chd-cd": "CD-based discs (PS1, Saturn, Sega CD, Dreamcast, PC Engine CD, 3DO) — chdman's CD mode understands CD track/cue structure.",
@@ -149,6 +161,8 @@ export function ReviewPage({
   const [matches, setMatches] = useState<Record<string, DuplicateMatch | null>>({});
   /** Skip is the default for every duplicate — the safe choice is the one that needs no click. */
   const [decisions, setDecisions] = useState<Record<string, "skip" | "replace">>({});
+  /** null while loading — the checkbox renders disabled rather than flashing an initial state that might not be the real one. */
+  const [groupMultiDiscFolders, setGroupMultiDiscFolders] = useState<boolean | null>(null);
 
   useEffect(() => {
     setJobs(initialJobs);
@@ -209,6 +223,12 @@ export function ReviewPage({
       .catch((e) => setError(toAppError(e)));
   }, []);
 
+  useEffect(() => {
+    fetchPerformanceConfig()
+      .then((c) => setGroupMultiDiscFolders(c.groupMultiDiscFolders))
+      .catch((e) => setError(toAppError(e)));
+  }, []);
+
   /**
    * Re-plans `sourcePaths` and merges the results into the table, leaving every other
    * row untouched. Scoping this matters: planning re-runs detection on each path, and
@@ -231,9 +251,37 @@ export function ReviewPage({
   }
 
   async function applyOverride(sourcePath: string, next: PlanOverride) {
-    const nextOverrides = { ...overrides, [sourcePath]: { ...overrides[sourcePath], ...next } };
+    const job = jobs.find((j) => j.sourcePath === sourcePath);
+    // A system/action correction for one disc of a set almost always applies to every disc
+    // in it — they're the same game, and a second or third disc's own detection is often
+    // weaker or absent (title screens, straight audio tracks) even when the set as a whole
+    // is obvious from disc 1. Matched by filename pattern rather than the server-confirmed
+    // discGroupKey: that key only exists once every disc already agrees on a system, which
+    // is exactly not yet true the moment disc 1 gets corrected and disc 2 still shows the old,
+    // wrong guess. Only System and Action route through here — the separate Skip/Replace
+    // duplicate decision is deliberately left per-file.
+    const baseName = discBaseName(job?.sourceName ?? "");
+    const groupSourcePaths = baseName ? jobs.filter((j) => discBaseName(j.sourceName) === baseName).map((j) => j.sourcePath) : [sourcePath];
+
+    const nextOverrides = { ...overrides };
+    for (const path of groupSourcePaths) {
+      nextOverrides[path] = { ...overrides[path], ...next };
+    }
     setOverrides(nextOverrides);
-    await replan(nextOverrides, [sourcePath]);
+    await replan(nextOverrides, groupSourcePaths);
+  }
+
+  async function handleToggleGrouping(next: boolean) {
+    setError(null);
+    const previous = groupMultiDiscFolders;
+    setGroupMultiDiscFolders(next);
+    try {
+      await setPerformanceConfig({ groupMultiDiscFolders: next });
+      await replan(overrides, jobs.map((j) => j.sourcePath));
+    } catch (e) {
+      setGroupMultiDiscFolders(previous);
+      setError(toAppError(e));
+    }
   }
 
   async function handleCreateFolder(systemId: string, defaultName: string) {
@@ -293,6 +341,28 @@ export function ReviewPage({
     }
   }
 
+  /**
+   * Clusters a multi-disc set's rows together, ordered by disc number, instead of leaving
+   * them scattered wherever they happened to land in `jobs`. A set is placed at the position
+   * of whichever of its discs appears first, so adding more files doesn't reshuffle rows
+   * that were already visible.
+   */
+  const displayJobs = useMemo(() => {
+    const seenGroups = new Set<string>();
+    const result: PlannedJob[] = [];
+    for (const job of jobs) {
+      if (job.discGroupKey == null) {
+        result.push(job);
+        continue;
+      }
+      if (seenGroups.has(job.discGroupKey)) continue;
+      seenGroups.add(job.discGroupKey);
+      const members = jobs.filter((j) => j.discGroupKey === job.discGroupKey).sort((a, b) => (a.discGroupIndex ?? 0) - (b.discGroupIndex ?? 0));
+      result.push(...members);
+    }
+    return result;
+  }, [jobs]);
+
   if (jobs.length === 0) {
     return (
       <div className="review-page">
@@ -305,12 +375,24 @@ export function ReviewPage({
   const skippedCount = jobs.filter((j) => decisions[j.sourcePath] === "skip").length;
   const readyCount = plannable.filter((j) => decisions[j.sourcePath] !== "skip").length;
   const duplicateCount = jobs.filter((j) => matches[j.sourcePath]).length;
+  const hasDiscGroups = jobs.some((j) => j.discGroupKey != null);
 
   return (
     <div className="review-page">
       <p className="preview-banner">
         Writing to <strong>{targetName}</strong>. Files are converted and copied when you click Process — nothing happens until then.
       </p>
+      {hasDiscGroups && (
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={groupMultiDiscFolders ?? true}
+            disabled={groupMultiDiscFolders === null || busy}
+            onChange={(e) => handleToggleGrouping(e.target.checked)}
+          />
+          Group multi-disc games into their own folder (with the .m3u playlist inside)
+        </label>
+      )}
       <details className="action-help">
         <summary>What do these actions mean?</summary>
         <ul>
@@ -370,21 +452,35 @@ export function ReviewPage({
           </tr>
         </thead>
         <tbody>
-          {jobs.map((job) => (
-            <tr
-              key={job.sourcePath}
-              className={[
-                decisions[job.sourcePath] === "skip" ? "plan-row-skipped" : "",
-                job.warnings.some((w) => w.level === "blocker")
-                  ? "plan-row-blocked"
-                  : job.warnings.some((w) => w.level === "warning")
-                    ? "plan-row-warn"
-                    : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              <td data-label="File" className="mono">{job.sourceName}</td>
+          {displayJobs.map((job, i) => {
+            const isGrouped = job.discGroupKey != null;
+            const isGroupFirst = isGrouped && displayJobs[i - 1]?.discGroupKey !== job.discGroupKey;
+            const isGroupLast = isGrouped && displayJobs[i + 1]?.discGroupKey !== job.discGroupKey;
+            return (
+              <tr
+                key={job.sourcePath}
+                className={[
+                  decisions[job.sourcePath] === "skip" ? "plan-row-skipped" : "",
+                  job.warnings.some((w) => w.level === "blocker")
+                    ? "plan-row-blocked"
+                    : job.warnings.some((w) => w.level === "warning")
+                      ? "plan-row-warn"
+                      : "",
+                  isGrouped ? "disc-group-row" : "",
+                  isGroupFirst ? "disc-group-first" : "",
+                  isGroupLast ? "disc-group-last" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              >
+                <td data-label="File" className="mono">
+                  {job.sourceName}
+                  {job.discGroupTotal !== null && (
+                    <span className="disc-group-badge" title="Part of a multi-disc set">
+                      Disc {job.discGroupIndex}/{job.discGroupTotal}
+                    </span>
+                  )}
+                </td>
               <td data-label="Status">
                 {matches[job.sourcePath] ? (
                   <DuplicateCell
@@ -452,14 +548,15 @@ export function ReviewPage({
                 {formatBytes(job.sourceBytes)} → {formatBytes(job.estimatedOutputBytes)}
               </td>
               <td data-label="Warnings">
-                {job.warnings.map((w, i) => (
-                  <div key={i} className={`warning-line warning-${w.level}`}>
+                {job.warnings.map((w, wi) => (
+                  <div key={wi} className={`warning-line warning-${w.level}`}>
                     {WARNING_ICON[w.level]} {w.text}
                   </div>
                 ))}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
       </div>
